@@ -1,0 +1,22 @@
+.idea
+
+# Python cache / build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Model weights / checkpoints
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.bin
+*.h5
+
+# Common experiment outputs
+runs/
+results/
+logs/
+wandb/

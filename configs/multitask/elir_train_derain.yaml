@@ -1,0 +1,78 @@
+﻿env_cfg:
+  run_name: derain_paired
+  project_name: elir
+  task: derain
+  out_dir: ./runs
+  seed: 2025
+
+dataset_cfg:
+  train_dataset:
+    name: Paired
+    path: ~/moxt/DiffUIR/Datasets/Restoration/syn_rain/train
+    lq_subdir: lq
+    hq_subdir: hq
+    patch_size: 256
+    training: true
+    pad_to_multiple: 8
+    batch_size: 8
+    num_workers: 8
+  val_dataset:
+    name: Paired
+    path: ~/moxt/DiffUIR/Datasets/Restoration/syn_rain/val
+    lq_subdir: lq
+    hq_subdir: hq
+    patch_size: 256
+    training: false
+    pad_to_multiple: 8
+    batch_size: 4
+    num_workers: 4
+
+fm_cfg:
+  method: l2_cfm_mse_loss
+  k_steps: 5
+  t_emb_dim: 160
+  sigma_min: 0.00001
+  sigma_s: 0.1
+  dt: 0.05
+  alpha: 0.001
+  beta: 0.001
+
+model_cfg:
+  arch_cfg:
+    name: elir
+    params:
+      fm_cfg: {k_steps: 5, sigma_s: 0.1, latent_shape: [16,64,64], seed: 2025}
+      fmir_cfg:
+        name: lunet
+        params: {ch_mult: [1,2,1,2], n_mid_blocks: 3, in_channels: 16, hid_channels: 128, out_channels: 16,
+                 t_emb_dim: 160, overparametrization: True}
+        trainable: true
+      mmse_cfg:
+        name: rrdbnet
+        params: {c_inout: 16, c_hid: 96, n_rrdb: 3, overparametrization: True}
+        trainable: true
+      enc_cfg: {name: taesd, trainable: false}
+      dec_cfg: {name: taesd, trainable: false}
+    path: null
+  teacher_cfg: null
+
+train_cfg:
+  epochs: 400
+  ckpt_path: null
+  optimizer: !name:torch.optim.AdamW
+  lr: 0.0001
+  optimizer_params: {}
+  ema_decay: 0.999
+  max_steps: -1
+  check_val_every_n_epoch: 3
+  num_sanity_val_steps: 0
+  strategy: auto
+  devices: 1
+  accelerator: gpu
+  precision: 16-mixed
+  accumulate_grad_batches: 4
+  wandb: false
+
+eval_cfg:
+  metrics: [psnr, ssim, fid]
+

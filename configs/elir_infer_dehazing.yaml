@@ -1,0 +1,38 @@
+﻿# Inference configuration for image dehazing on RESIDE SOTS (outdoor/indoor).
+#
+# 鐢ㄦ硶绀轰緥锛?#   python infer.py -y configs/elir_infer_dehazing.yaml --save_dir ./results/sots_outdoor
+#
+# 璇存槑锛?#   - image_size 涓嶈缃紙娉ㄩ噴鎺夛級锛屽惎鐢ㄥ師濮嬪垎杈ㄧ巼鎺ㄧ悊妯″紡銆?#   - 鑴氭湰浼氳嚜鍔ㄥ H/W 濉厖涓?8 鐨勫€嶆暟锛屾帹鐞嗗悗瑁佸壀鍥炲師濮嬪昂瀵革紝鏃犻粦杈广€?#   - 杈撳嚭鏂囦欢鍚嶄繚鐣欏師濮嬮浘鍥炬枃浠跺悕锛堝 0001_1_0.8.png锛夛紝渚?SOTS.m 鑴氭湰鍖归厤浣跨敤銆?
+# ###########################################
+# Setup Configuration
+# ###########################################
+env_cfg:
+  seed: 2025
+
+# -------------------------------------------------
+# Model
+# -------------------------------------------------
+model_cfg:
+  arch_cfg:
+    name: elir
+    params:
+      fm_cfg: {k_steps: 5, sigma_s: 0.1, latent_shape: [4,64,64], seed: 2025}
+      fmir_cfg:
+        name: lunet
+        params: {ch_mult: [1,2,1,2], n_mid_blocks: 3, in_channels: 4, hid_channels: 128, out_channels: 4,
+                 t_emb_dim: 160, overparametrization: False}
+        trainable: False
+      mmse_cfg:
+        name: rrdbnet
+        params: {c_inout: 4, c_hid: 96, n_rrdb: 3, overparametrization: False}
+        trainable: False
+      enc_cfg: {name: tiny_enc, trainable: False}
+      dec_cfg: {name: tiny_dec, trainable: False}
+    path: /path/to/elir_dehazing.pth   # 濉叆璁粌濂界殑鍘婚浘妯″瀷鏉冮噸璺緞
+
+# -------------------------------------------------
+# Inference
+# -------------------------------------------------
+eval_cfg:
+  in_folder: /path/to/SOTS/outdoor/haze  # SOTS haze 鍥剧洰褰曪紙鍚?<id>_*.png 鏂囦欢锛?  out_folder: ./results/sots_outdoor      # 鎺ㄧ悊缁撴灉淇濆瓨鐩綍锛堝彲鐢?--save_dir 瑕嗙洊锛?  # image_size 涓嶈缃?鈫?鍚敤鍘熷鍒嗚鲸鐜囨ā寮忥紙pad-infer-unpad锛夛紝淇濈暀鐪熷疄瀹介珮
+  # chop 涓嶈缃?鈫?鍗曟鍓嶅悜鎺ㄧ悊鏁村紶鍥撅紙SOTS 鍥剧墖灏哄杈冨皬锛屾棤闇€鍒嗗潡锛?
