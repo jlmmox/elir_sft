@@ -43,6 +43,27 @@ class IRSetup(L.LightningModule):
             os.makedirs(self.samples_dir, exist_ok=True)  # run folder
             self.samples = []
             self.max_save_images = int(self.eval_cfg.get("max_save_images", 4))
+        self._runtime_space_logged = False
+
+    def _infer_runtime_space(self, x_lq):
+        method = str(self.fm_cfg.get("method", ""))
+        has_enc = hasattr(self.model, "enc") and (self.model.enc is not None)
+        has_dec = hasattr(self.model, "dec") and (self.model.dec is not None)
+
+        # Priority by actual model structure + current input channels.
+        if x_lq is not None and x_lq.ndim == 4 and x_lq.shape[1] in [4, 16]:
+            return "latent_cache", 0.0
+        if has_enc:
+            return "latent_vae", 0.0
+        if (not has_enc) and (not has_dec):
+            return "pixel_space", 1.0
+
+        # Fallback using configured loss naming.
+        if "pixel" in method and "ablation" in method:
+            return "pixel_space", 1.0
+        if "pixel" in method:
+            return "pixel_space", 1.0
+        return "unknown", 0.0
 
     def optimizer_step(
         self,
@@ -57,8 +78,21 @@ class IRSetup(L.LightningModule):
 
     def training_step(self, batch, batch_idx):
         x_lq, x_hq = batch[0], batch[1]
+        if not self._runtime_space_logged:
+            runtime_space, is_pixel_space = self._infer_runtime_space(x_lq)
+            print(
+                f"[RuntimeSpace] mode={runtime_space}, "
+                f"x_lq_channels={int(x_lq.shape[1])}, "
+                f"has_enc={hasattr(self.model, 'enc') and (self.model.enc is not None)}, "
+                f"has_dec={hasattr(self.model, 'dec') and (self.model.dec is not None)}, "
+                f"loss_method={self.fm_cfg.get('method')}"
+            )
+            self.log("runtime/is_pixel_space", float(is_pixel_space), logger=True, prog_bar=True)
+            self._runtime_space_logged = True
         # Loss function
-        loss = get_loss(self.model, x_hq, x_lq, self.fm_cfg, self.tmodel)
+        fm_cfg_runtime = dict(self.fm_cfg)
+        fm_cfg_runtime["global_step"] = int(self.global_step)
+        loss = get_loss(self.model, x_hq, x_lq, fm_cfg_runtime, self.tmodel)
 
         self.train_loss.append(loss)
         if batch_idx % 5:
@@ -129,29 +163,23 @@ class IRSetup(L.LightningModule):
             self.log(metric_eval.metric, result, sync_dist=True, prog_bar=True)
         torch.cuda.empty_cache()
 
+    def _save_optional_state(self, checkpoint, key, module):
+        if module is not None:
+            checkpoint[key] = module.state_dict()
+
     def on_save_checkpoint(self, checkpoint):
         if self.ema:
-            if hasattr(self.ema.model,"fmir"):
-                checkpoint['state_dict_fmir'] = self.ema.model.fmir.state_dict()
-            if hasattr(self.ema.model,"mmse"):
-                checkpoint['state_dict_mmse'] = self.ema.model.mmse.state_dict()
-            if hasattr(self.ema.model,"enc"):
-                checkpoint['state_dict_enc'] = self.ema.model.enc.state_dict()
-            if hasattr(self.ema.model,"dec"):
-                checkpoint['state_dict_dec'] = self.ema.model.dec.state_dict()
-            if hasattr(self.ema.model,"sft_refiner"):
-                checkpoint['state_dict_sft'] = self.ema.model.sft_refiner.state_dict()
+            self._save_optional_state(checkpoint, 'state_dict_fmir', getattr(self.ema.model, 'fmir', None))
+            self._save_optional_state(checkpoint, 'state_dict_mmse', getattr(self.ema.model, 'mmse', None))
+            self._save_optional_state(checkpoint, 'state_dict_enc', getattr(self.ema.model, 'enc', None))
+            self._save_optional_state(checkpoint, 'state_dict_dec', getattr(self.ema.model, 'dec', None))
+            self._save_optional_state(checkpoint, 'state_dict_sft', getattr(self.ema.model, 'sft_refiner', None))
         else:
-            if hasattr(self.model,"fmir"):
-                checkpoint['state_dict_fmir'] = self.model.fmir.state_dict()
-            if hasattr(self.model,"mmse"):
-                checkpoint['state_dict_mmse'] = self.model.mmse.state_dict()
-            if hasattr(self.model,"enc"):
-                checkpoint['state_dict_enc'] = self.model.enc.state_dict()
-            if hasattr(self.model,"dec"):
-                checkpoint['state_dict_dec'] = self.model.dec.state_dict()
-            if hasattr(self.model,"sft_refiner"):
-                checkpoint['state_dict_sft'] = self.model.sft_refiner.state_dict()
+            self._save_optional_state(checkpoint, 'state_dict_fmir', getattr(self.model, 'fmir', None))
+            self._save_optional_state(checkpoint, 'state_dict_mmse', getattr(self.model, 'mmse', None))
+            self._save_optional_state(checkpoint, 'state_dict_enc', getattr(self.model, 'enc', None))
+            self._save_optional_state(checkpoint, 'state_dict_dec', getattr(self.model, 'dec', None))
+            self._save_optional_state(checkpoint, 'state_dict_sft', getattr(self.model, 'sft_refiner', None))
         return checkpoint
 
     def configure_optimizers(self):

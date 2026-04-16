@@ -8,6 +8,7 @@ from ELIR.training.tparmas import get_opt_sched
 import pytorch_lightning as L
 from pytorch_lightning.loggers import WandbLogger, CSVLogger, TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.strategies import DDPStrategy
 from ELIR.irsetup import IRSetup
 import os
 import torch
@@ -118,11 +119,16 @@ def run_train(conf):
                                  every_n_epochs=1,
                                  save_weights_only=train_cfg.get("save_weights_only", False), save_top_k=1,
                                  save_on_train_epoch_end=True, verbose=True)
+
+    strategy_cfg = train_cfg.get("strategy", "ddp")
+    if str(strategy_cfg).lower() == "ddp" and bool(train_cfg.get("find_unused_parameters", False)):
+        strategy_cfg = DDPStrategy(find_unused_parameters=True)
+
     trainer = L.Trainer(max_epochs=train_cfg.get("epochs"),
                         default_root_dir = run_dir,
                         callbacks=checkpoint,
                         # allow overriding strategy/devices/accelerator via yaml or CLI
-                        strategy = train_cfg.get("strategy", "ddp"),
+                        strategy = strategy_cfg,
                         devices = train_cfg.get("devices", "auto"),
                         accelerator=train_cfg.get("accelerator", "gpu"),
                         precision=train_cfg.get("precision", "32-true"),

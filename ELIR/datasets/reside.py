@@ -128,26 +128,20 @@ class RESIDEDataset(Dataset):
             lq = ImageOps.mirror(lq)
             hq = ImageOps.mirror(hq)
         
-        # 配对一致的色彩抖动：生成一组随机参数，再同时作用于 LQ 和 HQ
-        if torch.rand(1) < 0.5:
-            # 手动生成随机色彩增强参数，确保 LQ 和 HQ 使用完全相同的参数
-            brightness_factor = np.random.uniform(0.95, 1.05)   # 亮度：95% ~ 105%
-            contrast_factor = np.random.uniform(0.95, 1.05)     # 对比度：95% ~ 105%
-            saturation_factor = np.random.uniform(0.95, 1.05)   # 饱和度：95% ~ 105%
-            hue_factor = np.random.uniform(-0.02, 0.02)         # 色相：-0.02 ~ 0.02
-            
-            # 使用相同参数分别作用于 LQ 和 HQ，确保配对一致性
+        # 配对一致的轻量色彩抖动：仅 20% 概率触发，控制在 ±5%
+        if torch.rand(1) < 0.2:
+            brightness_factor = np.random.uniform(0.95, 1.05)
+            contrast_factor = np.random.uniform(0.95, 1.05)
+            saturation_factor = np.random.uniform(0.95, 1.05)
+
             lq = TF.adjust_brightness(lq, brightness_factor)
             hq = TF.adjust_brightness(hq, brightness_factor)
-            
+
             lq = TF.adjust_contrast(lq, contrast_factor)
             hq = TF.adjust_contrast(hq, contrast_factor)
-            
+
             lq = TF.adjust_saturation(lq, saturation_factor)
             hq = TF.adjust_saturation(hq, saturation_factor)
-            
-            lq = TF.adjust_hue(lq, hue_factor)
-            hq = TF.adjust_hue(hq, hue_factor)
         
         return lq, hq
 

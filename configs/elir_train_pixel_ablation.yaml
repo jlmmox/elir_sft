@@ -2,7 +2,7 @@
 # Stage 1: Latent Flow Matching + Pixel MSE Supervision (4090 24GB 极限算力版)
 
 env_cfg:
-  run_name: dehazing_reside_stage2
+  run_name: dehazing_reside_pixel_ablation
   project_name: elir
   task: dehazing
   out_dir: ./runs
@@ -17,8 +17,8 @@ dataset_cfg:
     path: ~/moxt/DiffUIR/Datasets/Restoration/RESIDE/OTS_ALPHA/train
     lq_subdir: lq
     hq_subdir: hq
-    patch_size: 256              # 24G 显存足以支撑 256 的 patch
-    batch_size: 4                # 4090 保本设置，如果跑起来显存还有富余，可以尝试拉到 8
+    patch_size: 256
+    batch_size: 1
     num_workers: 4
     training: true
     use_latent_cache: false
@@ -37,7 +37,7 @@ dataset_cfg:
 # Flow-Matching
 # -------------------------------------------------
 fm_cfg:
-  method: pixel_space_l2_cfm_loss        # 【修改 1】必须切回 Stage 1 的损失函数！这里面包含了我们刚加的 0.5*像素解码监督
+  method: charbonnier_ssim_cfm_loss
   k_steps: 5
   t_emb_dim: 160
   sigma_min: 0.00001
@@ -53,32 +53,23 @@ model_cfg:
   arch_cfg:
     name: elir
     params:
-      fm_cfg: {k_steps: 5, sigma_s: 0.1, latent_shape: [16,64,64], seed: 2025,
-               dynamic_noise: false,
-               force_static_noise: true
+      fm_cfg: {k_steps: 5, sigma_s: 0.1, latent_shape: [3,256,256], seed: 2025,
+               dynamic_noise: true,
+               force_static_noise: false
       }
       fmir_cfg:
         name: lunet
-        params: {ch_mult: [1,2,1,2], n_mid_blocks: 3, in_channels: 16, hid_channels: 128, out_channels: 16,
-                 t_emb_dim: 160, overparametrization: True}
-        trainable: false         # 【修改 2】解冻！Stage 1 的核心就是训练流场网络
+        params: {ch_mult: [1,2,4,8], n_mid_blocks: 3, in_channels: 3, hid_channels: 64, out_channels: 3,
+                 t_emb_dim: 160, overparametrization: True, use_checkpoint: true}
+        trainable: true
       mmse_cfg:
         name: rrdbnet
-        params: {c_inout: 16, c_hid: 96, n_rrdb: 3, overparametrization: True}
-        trainable: false          # 【修改 3】解冻！MMSE 先验网络也需要一起训
-      enc_cfg:
-        name: taesd
-        trainable: false        # 冻结 VAE 编码器
-      dec_cfg:
-        name: taesd
-        trainable: false         # 冻结 VAE 解码器
+        params: {c_inout: 3, c_hid: 96, n_rrdb: 3, overparametrization: True}
+        trainable: true
       sft_cfg:
-        trainable: true        # 【修改 4】彻底冻结！Stage 1 严禁 SFT 参与抢夺梯度
+        trainable: false
         params: { in_channels: 3, out_channels: 3, hidden_channels: 16 }
-    path: /home/a27/moxt/elir_sft/runs/dehazing_reside_stage1/epoch=2-step=200000.ckpt                 # 【修改 5】设为空 (null)。我们要从头训练一个极其扎实的基底，不要加载以前那版妥协过的权重。
-  teacher_cfg: { name: taesd,
-                 params: { },
-                 trainable: false }
+    path: null
 
 # -------------------------------------------------
 # Training
@@ -89,7 +80,7 @@ train_cfg:
   optimizer: !name:torch.optim.AdamW
   lr: 0.0001
   optimizer_params: {}
-  ema_decay: 0              # 【修改 6】强烈建议开启 EMA (从 0 改为 0.999)。对于 Flow/ODE 模型，EMA 权重的推理指标和稳定性远超当前权重。
+  ema_decay: 0.999
   max_steps: 100000
   check_val_every_n_epoch: 10
   num_sanity_val_steps: 2
@@ -100,6 +91,7 @@ train_cfg:
   strategy: auto
   devices: 1
   accelerator: gpu
+  accumulate_grad_batches: 2
 
 eval_cfg:
   metrics: ["psnr", "fid", "ssim"]

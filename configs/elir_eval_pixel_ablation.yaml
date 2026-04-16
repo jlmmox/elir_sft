@@ -1,0 +1,51 @@
+# Evaluation config for ELIR pixel-space ablation (no VAE).
+# Usage:
+#   python eval.py -y configs/elir_eval_pixel_ablation.yaml
+
+env_cfg:
+  seed: 2025
+
+dataset_cfg:
+  val_dataset:
+    name: Paired
+    path: ~/moxt/DiffUIR/Datasets/Restoration/RESIDE/SOTS/outdoor/test/val
+    lq_subdir: haze
+    hq_subdir: clear
+    patch_size: null
+    batch_size: 1
+    num_workers: 4
+    training: false
+    use_latent_cache: false
+
+model_cfg:
+  arch_cfg:
+    name: elir
+    params:
+      fm_cfg:
+        k_steps: 5
+        sigma_s: 0.1
+        latent_shape: [3,256,256]
+        seed: 2025
+        dynamic_noise: false
+        force_static_noise: true
+        detach_latent_path: true
+      fmir_cfg:
+        name: lunet
+        params: {ch_mult: [1,2,4,8], n_mid_blocks: 3, in_channels: 3, hid_channels: 128, out_channels: 3,
+                 t_emb_dim: 160, overparametrization: True, use_checkpoint: false}
+        trainable: false
+      mmse_cfg:
+        name: rrdbnet
+        params: {c_inout: 3, c_hid: 96, n_rrdb: 3, overparametrization: True}
+        trainable: false
+      sft_cfg:
+        trainable: false
+        params: {in_channels: 3, out_channels: 3, hidden_channels: 16}
+    # Replace with your trained pixel-ablation checkpoint path.
+    path: null
+
+eval_cfg:
+  metrics: [psnr, fid, ssim]
+  save_images: true
+  max_save_images: 4
+  out_dir: ./runs/eval_pixel_ablation

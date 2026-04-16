@@ -11,3 +11,4 @@ HyperPyYAML
 tqdm
 PyYAML
 diffusers
+piq

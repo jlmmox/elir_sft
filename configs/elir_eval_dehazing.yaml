@@ -1,4 +1,4 @@
-﻿# Evaluation config for ELIR dehazing.
+﻿# Evaluation config for ELIR dehazing (Stage 2 SFT).
 # Usage:
 #   python eval.py -y configs/elir_eval_dehazing.yaml
 
@@ -7,12 +7,11 @@ env_cfg:
 
 dataset_cfg:
   val_dataset:
-    name: Paired
-    path: /home/a27/moxt/DiffUIR/Datasets/Restoration/RESIDE/SOTS/outdoor/train/paired/val
+    name: RESIDE
+    path: /home/a27/moxt/DiffUIR/Datasets/Restoration/RESIDE/SOTS/outdoor/test
     lq_subdir: lq
     hq_subdir: hq
     patch_size: null
-    pad_to_multiple: 64
     batch_size: 1
     num_workers: 4
     training: false
@@ -22,7 +21,14 @@ model_cfg:
   arch_cfg:
     name: elir
     params:
-      fm_cfg: {k_steps: 5, sigma_s: 0.1, latent_shape: [16,64,64], seed: 2025}
+      fm_cfg:
+        k_steps: 15
+        sigma_s: 0.1
+        latent_shape: [16,64,64]
+        seed: 2025
+        dynamic_noise: false        # 测试时必须关闭动态噪声
+        force_static_noise: true    # 【修改1】强制静态噪声对齐，保证 SFT 基底绝对稳定
+        detach_latent_path: true    # 【修改2】对齐 Stage 2 配置，彻底切断前置梯度图
       fmir_cfg:
         name: lunet
         params: {ch_mult: [1,2,1,2], n_mid_blocks: 3, in_channels: 16, hid_channels: 128, out_channels: 16,
@@ -38,13 +44,20 @@ model_cfg:
       dec_cfg:
         name: taesd
         trainable: false
-    path: /home/a27/moxt/elir_base-main/runs/dehazing_reside/epoch=2-step=100000.ckpt
+      # 【修改3】必须补充 SFT 配置，否则模型加载时会静默丢弃 SFT 权重！
+      sft_cfg:
+        trainable: false            # 测试阶段严禁计算梯度
+        params:
+          in_channels: 3
+          out_channels: 3
+          hidden_channels: 16
+
+    # 【注意】确保这里的路径是指向你 Stage 2 (SFT 微调后) 的权重！
+    path: /home/a27/moxt/elir_sft/runs/dehazing_reside_stage2/epoch=1-step=100000.ckpt
 
 eval_cfg:
-  in_folder: /home/a27/moxt/DiffUIR/Datasets/Restoration/RESIDE/SOTS/outdoor/train/paired/haze
-  out_folder: ./runs/test_vae_dehazing
-  image_size: 256
+  # image_size: 256  # 【修改4】建议注释或删除。模型内部已有 pad-forward-crop 完美对齐，外部无需限制尺寸
   metrics: [psnr, fid, ssim]
   save_images: true
   max_save_images: 4
-  out_dir: ./runs/eval_dehazing
+  out_dir: ./runs/eval_hazing_dectrain

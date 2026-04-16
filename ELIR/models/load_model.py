@@ -47,6 +47,9 @@ def get_model(cfg):
     elif model_name == "fm_vae":
         from ELIR.models.fm_vae import FMVAEWrapper
         model = FMVAEWrapper(pretrained_path=model_path)
+    elif model_name == "sdvae":
+        from ELIR.models.sdvae import SDVAEWrapper
+        model = SDVAEWrapper()
     else:
         raise Exception("Model {} is unknown!".format(model_name))
 

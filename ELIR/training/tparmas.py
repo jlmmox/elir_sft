@@ -5,12 +5,14 @@ def get_optimizer(train_cfg, model):
     lr = train_cfg.get("lr", 0.0001)
     optimizer_params = train_cfg.get("optimizer_params", {})
     optimizer_params['lr'] = lr
-    params = model.parameters()
+    params = [p for p in model.parameters() if p.requires_grad]
+    if len(params) == 0:
+        raise ValueError("No trainable parameters found after filtering requires_grad=False.")
     optimizer = train_cfg.get("optimizer", None)
     if optimizer:
         return optimizer(params, **optimizer_params)
     else:
-        return torch.optim.adam(params, **optimizer_params)
+        return torch.optim.Adam(params, **optimizer_params)
 
 def get_scheduler(train_cfg, optimizer):
     scheduler_params = train_cfg.get("scheduler_params", {})

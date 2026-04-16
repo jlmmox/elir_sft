@@ -1,0 +1,118 @@
+﻿    # Training configuration for image dehazing on the RESIDE (OTS/SOTS) dataset.
+#
+# RESIDE 目录结构示例（OTS 训练集）：
+#   /path/to/OTS/
+#       haze/          <- LQ，文件名格式 <id>_<attenuation>_<beta>.png
+#           0001_1_0.8.png
+#           0001_2_0.6.png
+#           ...
+#       clear/         <- HQ，文件名格式 <id>.png
+#           0001.png
+#           ...
+#
+# SOTS 验证集（outdoor）具有相同目录结构。
+# ###########################################
+# Setup Configuration
+# ###########################################
+env_cfg:
+  run_name: derain_2        # 子目录名，所有输出写到 out_dir/run_name
+  project_name: elir               # 仅 wandb 用的项目名
+  task: derain                  # 任务标签（不影响代码逻辑，仅记录）
+  out_dir: ./runs                  # 训练输出根目录
+  seed: 2025                       # 随机种子
+
+# -------------------------------------------------
+# Dataset (RESIDE OTS/SOTS)
+# -------------------------------------------------
+dataset_cfg:
+  train_dataset:
+    name: Paired
+    path: ~/moxt/DiffUIR/Datasets/Restoration/syn_rain/train        # OTS 训练集根目录
+    lq_subdir: lq                # 含雾图子目录（文件名格式：<id>_<…>.png）
+    hq_subdir: hq               # 清晰图子目录（文件名格式：<id>.png）
+    patch_size: 256             # 训练时随机裁剪尺寸（同时保证是 8 的倍数）
+    batch_size: 8                 # 训练 batch 大小
+    num_workers: 8                 # DataLoader workers 数
+    training: true                 # true 时开启随机裁剪 + 水平翻转 + shuffle
+    use_latent_cache: false
+  val_dataset:
+    name: Paired
+    path: ~/moxt/DiffUIR/Datasets/Restoration/syn_rain/val  # SOTS outdoor 验证集根目录
+    lq_subdir: lq
+    hq_subdir: hq
+    patch_size: 256              # 验证时仍用 Padding2Multiple 对齐到 8 的倍数
+    batch_size: 1                  # 验证 batch 大小
+    num_workers: 1
+    training: false                # false 时关闭数据增强与 shuffle
+    use_latent_cache: false
+
+# -------------------------------------------------
+# Flow-Matching
+# -------------------------------------------------
+fm_cfg:
+  method: pixel_space_l2_cfm_loss       # flow-matching 损失类型
+  k_steps: 5                      # 采样步数
+  t_emb_dim: 160                   # 时间嵌入维度
+  sigma_min: 0.00001               # 最小噪声
+  sigma_s: 0.1                     # 初始噪声强度
+  dt: 0.05                         # 时间步长
+  alpha: 0.001                     # 损失权重（见 loss 实现）
+  beta: 0.001                      # 损失权重（见 loss 实现）
+
+# -------------------------------------------------
+# Model
+# -------------------------------------------------
+model_cfg:
+  arch_cfg:
+    name: elir
+    params:
+      fm_cfg: {k_steps: 5, sigma_s: 0.1, latent_shape: [16,64,64], seed: 2025,
+               dynamic_noise: false,     # false=静态噪声；true=每次前向随机噪声
+               force_static_noise: false # true 时无条件使用静态 self.noise（覆盖 dynamic_noise）
+      }
+      fmir_cfg:
+        name: lunet
+        params: {ch_mult: [1,2,1,2], n_mid_blocks: 3, in_channels: 16, hid_channels: 128, out_channels: 16,
+                 t_emb_dim: 160, overparametrization: True}  # 流场网络 U-Net 结构与时间嵌入
+        trainable: false                                    # 训练时更新流场网络
+      mmse_cfg:
+        name: rrdbnet
+        params: {c_inout: 16, c_hid: 96, n_rrdb: 3, overparametrization: True}  # MMSE 先验网络
+        trainable: false                                                        # 训练时更新 MMSE 网络
+      enc_cfg:
+        name: taesd
+        trainable: false
+      dec_cfg:
+        name: taesd
+        trainable: False
+      sft_cfg:
+        trainable: true        # 设为 false 可冻结 SFT_Refiner
+        params: { in_channels: 3, out_channels: 3, hidden_channels: 16 }
+    path:  /home/a27/moxt/elir_sft/runs/derain_1/epoch=307-step=500000.ckpt                     # 若做微调，填预训练 elir 权重路径
+  teacher_cfg: { name: taesd,
+                 params: { },
+                 trainable: False }
+
+# -------------------------------------------------
+# Training
+# -------------------------------------------------
+train_cfg:
+  epochs: -1                     # 训练轮数
+  ckpt_path:             # 若续训，填入 checkpoint 路径；否则留空
+  optimizer: !name:torch.optim.AdamW # 优化器类型
+  lr: 0.0001                       # 学习率
+  optimizer_params: {}             # 额外优化器参数
+  ema_decay: 0                # EMA 衰减；0 关闭 EMA
+  max_steps: 200000                   # -1 表示不限制步数
+  check_val_every_n_epoch: 10      # 每 N 轮做一次验证
+  num_sanity_val_steps: 2          # sanity check 步数
+  wandb: False                     # 是否启用 Weights & Biases 日志
+  logger: csv                      # 本地日志：csv / tensorboard / none
+  save_images: false                # 验证时是否存样例图
+  save_weights_only: false          # checkpoint 是否只存权重
+  # single-GPU setup
+  strategy: auto                   # Lightning strategy，单卡用 auto/None
+  devices: 1                       # 使用的设备数量
+  accelerator: gpu                 # 加速器类型，CPU 则设 cpu
+eval_cfg:
+  metrics: ["psnr", "fid", "ssim"]  # 评估指标列表
