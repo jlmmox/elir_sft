@@ -4,9 +4,12 @@ from torch.optim import Optimizer
 import pytorch_lightning as L
 import torch
 from ELIR.metrics import MetricEval
-from ELIR.training.losses import get_loss
+from ELIR.training.losses import get_loss, e2e_gan_loss
 from torchvision.utils import save_image
 from ELIR.training.ema_timm import ModelEMA
+from ELIR.training.perceptual import create_perceptual_loss
+from ELIR.models.gan import NLayerDiscriminator
+from ELIR.training.dino_align import DINOv2Encoder
 import os
 import torch.nn.functional as F
 from ELIR.utils import ImageSpliterTh
@@ -40,10 +43,44 @@ class IRSetup(L.LightningModule):
         self.max_save_images = 0
         if run_dir and save_images:
             self.samples_dir = os.path.join(run_dir, "samples")
-            os.makedirs(self.samples_dir, exist_ok=True)  # run folder
+            os.makedirs(self.samples_dir, exist_ok=True)
             self.samples = []
             self.max_save_images = int(self.eval_cfg.get("max_save_images", 4))
         self._runtime_space_logged = False
+
+        # ---- 端到端 GAN 训练组件 ----
+        self.is_e2e = (str(fm_cfg.get("method", "")).strip() == "e2e_gan")
+        self.discriminator = None
+        self.perceptual_fn = None
+        self.d_optimizer = None
+        self.dino_encoder = None
+        self._e2e_log_cache = {}
+        self._grad_accum = 1
+        self._accum_step = 0
+        self._lr_base_g = None
+        self._lr_base_d = None
+        self._lr_min_ratio = 0.01
+        if self.is_e2e:
+            self.automatic_optimization = False
+            self._grad_accum = int(fm_cfg.get("grad_accum", 4))
+            self._lr_min_ratio = float(fm_cfg.get("lr_min_ratio", 0.01))
+            self.discriminator = NLayerDiscriminator(
+                in_channels=3,
+                base_channels=int(fm_cfg.get("d_base_channels", 64)),
+                n_layers=int(fm_cfg.get("d_n_layers", 3)),
+            ).to(self.acc_device)
+            self.perceptual_fn, _ = create_perceptual_loss(
+                device=str(self.acc_device),
+                prefer_lpips=bool(fm_cfg.get("prefer_lpips", True)),
+            )
+            self.d_optimizer = torch.optim.AdamW(
+                self.discriminator.parameters(),
+                lr=float(fm_cfg.get("d_lr", 0.0001)),
+                betas=(0.5, 0.999),
+            )
+            # DINOv2 表示对齐：冻结的编码器 + 可训练 Projector（在 model 上）
+            if bool(fm_cfg.get("dino_align", False)):
+                self.dino_encoder = DINOv2Encoder(device=str(self.acc_device))
 
     def _infer_runtime_space(self, x_lq):
         method = str(self.fm_cfg.get("method", ""))
@@ -72,13 +109,88 @@ class IRSetup(L.LightningModule):
         optimizer: Union[Optimizer, LightningOptimizer],
         optimizer_closure: Optional[Callable[[], Any]] = None,
     ) -> None:
-        super().optimizer_step(epoch, batch_idx, optimizer, optimizer_closure)
-        if self.ema:
-            self.ema.update(self.model)
+        # EMA is handled in training_step for e2e mode.
+        if not self.is_e2e:
+            super().optimizer_step(epoch, batch_idx, optimizer, optimizer_closure)
+            if self.ema:
+                self.ema.update(self.model)
+
+    def _step_cosine_lr(self, opt_g, opt_d):
+        """Cosine annealing：初始 lr 余弦衰减到 lr_min_ratio 倍。"""
+        if self._lr_base_g is None:
+            self._lr_base_g = float(opt_g.param_groups[0]["lr"])
+            self._lr_base_d = float(opt_d.param_groups[0]["lr"])
+        max_steps = getattr(self.trainer, "max_steps", 300000) or 300000
+        progress = min(1.0, self.global_step / max(max_steps, 1))
+        lr_mult = self._lr_min_ratio + 0.5 * (1.0 - self._lr_min_ratio) * (1.0 + math.cos(math.pi * progress))
+        opt_g.param_groups[0]["lr"] = self._lr_base_g * lr_mult
+        opt_d.param_groups[0]["lr"] = self._lr_base_d * lr_mult
+
+    def _training_step_normal(self, batch, batch_idx):
+        x_lq, x_hq = batch[0], batch[1]
+        fm_cfg_runtime = dict(self.fm_cfg)
+        fm_cfg_runtime["global_step"] = int(self.global_step)
+        loss = get_loss(self.model, x_hq, x_lq, fm_cfg_runtime, self.tmodel)
+        self.train_loss.append(loss)
+        if batch_idx % 5:
+            self.log("train_loss", torch.mean(torch.Tensor(self.train_loss)).item(), logger=True, prog_bar=True)
+            self.train_loss.clear()
+        return loss
+
+    def _training_step_e2e(self, batch, batch_idx):
+        x_lq, x_hq = batch[0], batch[1]
+        opt_g, opt_d = self.optimizers()
+
+        fm_cfg_runtime = dict(self.fm_cfg)
+        fm_cfg_runtime["global_step"] = int(self.global_step)
+
+        g_loss, d_loss, metrics = e2e_gan_loss(
+            self.model, x_hq, x_lq, fm_cfg_runtime,
+            discriminator=self.discriminator,
+            perceptual_fn=self.perceptual_fn,
+            dino_encoder=self.dino_encoder,
+            step=int(self.global_step),
+            tmodel=self.tmodel,
+        )
+
+        # 手动梯度累积：损失按累积步数缩放
+        accum = max(1, self._grad_accum)
+        g_loss_scaled = g_loss / accum
+        d_loss_scaled = d_loss / accum
+
+        self.manual_backward(g_loss_scaled)
+        self.manual_backward(d_loss_scaled)
+
+        # 每 accum 步更新一次参数
+        self._accum_step += 1
+        grad_clip = float(self.fm_cfg.get("gradient_clip_val", 1.0))
+        if self._accum_step >= accum:
+            if grad_clip > 0:
+                self.clip_gradients(opt_g, gradient_clip_val=grad_clip, gradient_clip_algorithm="norm")
+                self.clip_gradients(opt_d, gradient_clip_val=grad_clip, gradient_clip_algorithm="norm")
+            opt_g.step()
+            opt_d.step()
+            opt_g.zero_grad()
+            opt_d.zero_grad()
+            # 手动 Cosine LR 衰减
+            self._step_cosine_lr(opt_g, opt_d)
+            if self.ema:
+                self.ema.update(self.model)
+            self._accum_step = 0
+
+        # ---- Logging ----
+        if batch_idx % 5 == 0:
+            self._e2e_log_cache = {k: metrics[k].item() if isinstance(metrics[k], torch.Tensor) else metrics[k] for k in metrics}
+            self.log_dict(self._e2e_log_cache, logger=True, prog_bar=False)
+            self.log("train_loss", g_loss.detach().item(), logger=True, prog_bar=True)
+            if isinstance(d_loss, torch.Tensor):
+                self.log("d_loss", d_loss.detach().item(), logger=True, prog_bar=True)
+
+        return g_loss.detach()
 
     def training_step(self, batch, batch_idx):
-        x_lq, x_hq = batch[0], batch[1]
         if not self._runtime_space_logged:
+            x_lq = batch[0]
             runtime_space, is_pixel_space = self._infer_runtime_space(x_lq)
             print(
                 f"[RuntimeSpace] mode={runtime_space}, "
@@ -89,16 +201,10 @@ class IRSetup(L.LightningModule):
             )
             self.log("runtime/is_pixel_space", float(is_pixel_space), logger=True, prog_bar=True)
             self._runtime_space_logged = True
-        # Loss function
-        fm_cfg_runtime = dict(self.fm_cfg)
-        fm_cfg_runtime["global_step"] = int(self.global_step)
-        loss = get_loss(self.model, x_hq, x_lq, fm_cfg_runtime, self.tmodel)
 
-        self.train_loss.append(loss)
-        if batch_idx % 5:
-            self.log("train_loss", torch.mean(torch.Tensor(self.train_loss)).item(), logger=True, prog_bar=True)
-            self.train_loss.clear()
-        return loss
+        if self.is_e2e:
+            return self._training_step_e2e(batch, batch_idx)
+        return self._training_step_normal(batch, batch_idx)
 
     def compute_metrics(self, x_hq_hat, x_hq):
         for metric_eval in self.metric_evals:
@@ -108,15 +214,16 @@ class IRSetup(L.LightningModule):
         sample_idx = 0
         for batch_samples in self.samples:
             for img in batch_samples:
-                out_path = os.path.join(self.samples_dir, f"epoch_{current_epoch}_{sample_idx:03d}.png")
+                out_path = os.path.join(self.samples_dir, f"sample_{sample_idx:03d}.png")
                 save_image(img, out_path)
                 sample_idx += 1
 
     def infer(self, x):
+        use_tta = bool(self.eval_cfg.get("use_tta", False))
         if self.ema:
-            return self.ema.model.inference(x)
+            return self.ema.model.inference(x, use_tta=use_tta)
         else:
-            return self.model.inference(x)
+            return self.model.inference(x, use_tta=use_tta)
 
     def validation_step(self, batch, batch_idx):
         x_lq, y = batch
@@ -180,9 +287,13 @@ class IRSetup(L.LightningModule):
             self._save_optional_state(checkpoint, 'state_dict_enc', getattr(self.model, 'enc', None))
             self._save_optional_state(checkpoint, 'state_dict_dec', getattr(self.model, 'dec', None))
             self._save_optional_state(checkpoint, 'state_dict_sft', getattr(self.model, 'sft_refiner', None))
+        if self.discriminator is not None:
+            self._save_optional_state(checkpoint, 'state_dict_disc', self.discriminator)
         return checkpoint
 
     def configure_optimizers(self):
+        if self.is_e2e:
+            return [self.optimizer, self.d_optimizer]
         if self.scheduler is None:
             return [self.optimizer]
         return [self.optimizer], [self.scheduler]

@@ -12,6 +12,8 @@ def argument_handler():
     parser.add_argument("--lr", type=float, help="learning rate")
     parser.add_argument("--weight_decay", type=float, help="weight decay")
     parser.add_argument("--ema_decay", type=float, help="EMA decay")
+    parser.add_argument("--train_mode", type=str,
+                        help="training mode switch: manual | stage1_backbone | sft_decoder")
     # Optional checkpoint path to resume/finetune
     parser.add_argument("--ckpt_path", type=str, help="checkpoint path for resume")
     parser.add_argument("--save_dir", dest="out_folder", type=str, default=None,

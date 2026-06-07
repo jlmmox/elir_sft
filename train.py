@@ -16,6 +16,110 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
+def _configure_train_mode(conf):
+    """Normalize module trainability based on a single train_mode switch."""
+    train_cfg = conf.get("train_cfg", {})
+    mode = str(train_cfg.get("train_mode", "manual")).strip().lower()
+    if mode in ["", "manual", "none"]:
+        return conf
+
+    model_cfg = conf.get("model_cfg", {})
+    arch_cfg = model_cfg.get("arch_cfg", {})
+    params = arch_cfg.get("params", {})
+    fmir_cfg = params.get("fmir_cfg", {})
+    mmse_cfg = params.get("mmse_cfg", {})
+    enc_cfg = params.get("enc_cfg", {})
+    dec_cfg = params.get("dec_cfg", {})
+    wavelet_cfg = params.get("wavelet_cfg", {})
+    fm_cfg = conf.get("fm_cfg", {})
+
+    if mode in ["stage1", "stage1_backbone", "backbone"]:
+        fmir_cfg["trainable"] = True
+        mmse_cfg["trainable"] = True
+        if isinstance(enc_cfg, dict):
+            enc_cfg["trainable"] = False
+        if isinstance(dec_cfg, dict):
+            dec_cfg["trainable"] = False
+            if dec_cfg.get("name") in ("sft_taesd_finetuner", "encoder_skip_fusion", "encoder_skip_wavelet_fusion"):
+                dec_cfg["name"] = "taesd"
+                dec_cfg.pop("params", None)
+                dec_cfg.pop("path", None)
+        if isinstance(wavelet_cfg, dict) and len(wavelet_cfg) > 0:
+            wavelet_cfg["trainable"] = False
+
+        # Stage1 backbone does not require SFT-specific decode supervision.
+        if str(fm_cfg.get("method", "")).strip() in ["", "charbonnier_ssim_cfm_loss"]:
+            fm_cfg["method"] = "pixel_space_l2_cfm_loss"
+
+    elif mode in ["sft", "sft_decoder", "stage2"]:
+        fmir_cfg["trainable"] = False
+        mmse_cfg["trainable"] = False
+        if isinstance(enc_cfg, dict):
+            enc_cfg["trainable"] = False
+        if isinstance(dec_cfg, dict):
+            dec_cfg["trainable"] = True
+            if dec_cfg.get("name") not in ("sft_taesd_finetuner", "encoder_skip_fusion", "encoder_skip_wavelet_fusion"):
+                raise ValueError(
+                    "train_mode=sft_decoder requires dec_cfg.name=sft_taesd_finetuner "
+                    "or encoder_skip_fusion or encoder_skip_wavelet_fusion, "
+                    f"got {dec_cfg.get('name')}"
+                )
+        if isinstance(wavelet_cfg, dict) and len(wavelet_cfg) > 0:
+            wavelet_cfg["trainable"] = wavelet_cfg.get("enabled", True)
+
+        # SFT decoder / encoder skip needs a decode-to-pixel loss term to receive gradients.
+        if str(fm_cfg.get("method", "")).strip() in ["", "pixel_space_l2_cfm_loss"]:
+            fm_cfg["method"] = "charbonnier_ssim_cfm_loss"
+
+    elif mode in ["e2e", "end_to_end"]:
+        fmir_cfg["trainable"] = True
+        mmse_cfg["trainable"] = True
+        if isinstance(enc_cfg, dict):
+            enc_cfg["trainable"] = False
+        if isinstance(dec_cfg, dict):
+            dec_cfg["trainable"] = True
+            if dec_cfg.get("name") not in ("sft_taesd_finetuner",):
+                raise ValueError(
+                    "train_mode=e2e requires dec_cfg.name=sft_taesd_finetuner "
+                    f"(WaveletStem→TanhSFT decoder). Got: {dec_cfg.get('name')}"
+                )
+        if isinstance(wavelet_cfg, dict) and len(wavelet_cfg) > 0:
+            wavelet_cfg["trainable"] = wavelet_cfg.get("enabled", True)
+        fm_cfg["method"] = "e2e_gan"
+        fm_cfg["detach_latent_path"] = False
+
+    else:
+        raise ValueError(
+            "Unsupported train_mode. Expected one of: manual, stage1_backbone, sft_decoder, "
+            "e2e (end_to_end). "
+            f"Got: {mode}"
+        )
+
+    params["fmir_cfg"] = fmir_cfg
+    params["mmse_cfg"] = mmse_cfg
+    params["enc_cfg"] = enc_cfg
+    params["dec_cfg"] = dec_cfg
+    params["wavelet_cfg"] = wavelet_cfg
+    arch_cfg["params"] = params
+    model_cfg["arch_cfg"] = arch_cfg
+    conf["model_cfg"] = model_cfg
+    conf["fm_cfg"] = fm_cfg
+
+    print(
+        "[train_mode] mode={}, fmir_trainable={}, mmse_trainable={}, enc_trainable={}, "
+        "dec_name={}, dec_trainable={}, loss_method={}".format(
+            mode,
+            fmir_cfg.get("trainable"),
+            mmse_cfg.get("trainable"),
+            enc_cfg.get("trainable") if isinstance(enc_cfg, dict) else None,
+            dec_cfg.get("name") if isinstance(dec_cfg, dict) else None,
+            dec_cfg.get("trainable") if isinstance(dec_cfg, dict) else None,
+            fm_cfg.get("method"),
+        )
+    )
+    return conf
+
+
 
 def run_train(conf):
     # ----------------------------
@@ -116,9 +220,14 @@ def run_train(conf):
                          run_dir=run_dir,
                          save_images=train_cfg.get("save_images", True))
     checkpoint = ModelCheckpoint(run_dir,
+                                 monitor="psnr",
+                                 mode="max",
                                  every_n_epochs=1,
-                                 save_weights_only=train_cfg.get("save_weights_only", False), save_top_k=1,
-                                 save_on_train_epoch_end=True, verbose=True)
+                                 save_weights_only=train_cfg.get("save_weights_only", False),
+                                 save_top_k=1,
+                                 save_last=True,
+                                 enable_version_counter=False,
+                                 save_on_train_epoch_end=True, verbose=False)
 
     strategy_cfg = train_cfg.get("strategy", "ddp")
     if str(strategy_cfg).lower() == "ddp" and bool(train_cfg.get("find_unused_parameters", False)):
@@ -178,6 +287,7 @@ if __name__ == "__main__":
     with open(yaml_path) as yaml_stream:
         conf = load_hyperpyyaml(yaml_stream)
     set_overides(conf, overides)
+    conf = _configure_train_mode(conf)
 
     # ----------------------------
     # Train

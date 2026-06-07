@@ -1,0 +1,66 @@
+# 端到端 LOL 低光增强评估
+# 用法：python eval.py -y configs/elir_eval_e2e_large_lol.yaml
+
+env_cfg:
+  seed: 2025
+
+dataset_cfg:
+  val_dataset:
+    name: LOL
+    path: ~/moxt/DiffUIR/Datasets/Restoration/LOL/test
+    lq_subdir: low
+    hq_subdir: high
+    patch_size: null
+    batch_size: 1
+    num_workers: 0
+    training: false
+    use_latent_cache: false
+
+model_cfg:
+  arch_cfg:
+    name: elir
+    params:
+      fm_cfg: {k_steps: 15, sigma_s: 0.1, latent_shape: [16,64,64], seed: 2025,
+               dynamic_noise: false, force_static_noise: false,
+               detach_latent_path: false}
+      fmir_cfg:
+        name: lunet
+        params: {ch_mult: [1,2,2,2], n_mid_blocks: 4, in_channels: 16, hid_channels: 192,
+                 out_channels: 16, t_emb_dim: 160, overparametrization: false,
+                 use_attn: true, attn_heads: 8, use_time_dilate: false}
+        trainable: false
+      mmse_cfg:
+        name: rrdbnet
+        params: {c_inout: 16, c_hid: 128, n_rrdb: 4, overparametrization: true}
+        trainable: false
+      enc_cfg:
+        name: taesd
+        trainable: false
+      dec_cfg:
+        name: sft_taesd_finetuner
+        path:
+        trainable: false
+        params:
+          latent_channels: 16
+          gamma_scale: 0.1
+          beta_scale: 0.1
+      wavelet_cfg:
+        enabled: true
+        in_channels: 3
+        base_channels: 16
+        use_ll: true
+        fuse_with_spatial: true
+        band_attn: true
+        fmir_use_wavelet_cond: true
+        trainable: false
+        visualize: false
+    path: /home/a27/moxt/elir_sftunet_ED/runs/elir_e2e_large_lol_timedilate/epoch=319-step=9600.ckpt
+  teacher_cfg: null
+
+eval_cfg:
+  image_size: 256
+  metrics: [psnr, fid, ssim]
+  use_tta: false
+  save_images: false
+  max_save_images: 4
+  out_dir: ./runs/eval_e2e_large_lol

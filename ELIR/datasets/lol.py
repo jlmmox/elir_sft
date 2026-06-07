@@ -94,6 +94,7 @@ class LOLDataset(Dataset):
         return Image.fromarray(rgb_eq.astype(np.uint8))
 
     def _joint_aug(self, lq: Image.Image, hq: Image.Image):
+        # 1. Joint random crop
         if self.patch_size is not None:
             lq_w, lq_h = lq.size
             hq_w, hq_h = hq.size
@@ -106,9 +107,30 @@ class LOLDataset(Dataset):
             lq = lq.crop(box)
             hq = hq.crop(box)
 
+        # 2. Joint 90° rotation (0/90/180/270)
+        if torch.rand(1) < 0.5:
+            angle = np.random.choice([0, 90, 180, 270])
+            if angle != 0:
+                lq = lq.rotate(angle, expand=False)
+                hq = hq.rotate(angle, expand=False)
+
+        # 3. Joint horizontal flip
         if torch.rand(1) < 0.5:
             lq = ImageOps.mirror(lq)
             hq = ImageOps.mirror(hq)
+
+        # 4. Joint brightness/contrast perturbation (mild, not changing LQ nature)
+        if torch.rand(1) < 0.3:
+            from PIL import ImageEnhance
+            bf = 0.9 + torch.rand(1).item() * 0.2    # [0.9, 1.1]
+            lq = ImageEnhance.Brightness(lq).enhance(bf)
+            hq = ImageEnhance.Brightness(hq).enhance(bf)
+        if torch.rand(1) < 0.3:
+            from PIL import ImageEnhance
+            cf = 0.9 + torch.rand(1).item() * 0.2    # [0.9, 1.1]
+            lq = ImageEnhance.Contrast(lq).enhance(cf)
+            hq = ImageEnhance.Contrast(hq).enhance(cf)
+
         return lq, hq
 
     def __len__(self):
@@ -120,8 +142,8 @@ class LOLDataset(Dataset):
         if self.use_latent_cache:
             lq_path = self.lq_pt_paths[idx]
             hq_path = self.hq_pt_paths[idx]
-            lq = torch.load(lq_path, weights_only=True)
-            hq = torch.load(hq_path, weights_only=True)
+            lq = torch.load(lq_path, weights_only=True).clone()
+            hq = torch.load(hq_path, weights_only=True).clone()
             return lq, hq
 
         lq_path, hq_path = self.pairs[idx]
@@ -136,7 +158,7 @@ class LOLDataset(Dataset):
             hq = self.pad(hq)
         else:
             # Validation/test must keep exact original resolution.
-            return self.to_tensor(lq), self.to_tensor(hq)
+            return self.to_tensor(lq).clone(), self.to_tensor(hq).clone()
 
         return self.to_tensor(lq), self.to_tensor(hq)
 

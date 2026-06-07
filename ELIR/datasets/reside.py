@@ -158,8 +158,8 @@ class RESIDEDataset(Dataset):
         if self.use_latent_cache:
             lq_path = self.lq_pt_paths[idx]
             hq_path = self.hq_pt_paths[idx]
-            lq = torch.load(lq_path, weights_only=True)
-            hq = torch.load(hq_path, weights_only=True)
+            lq = torch.load(lq_path, weights_only=True).clone()
+            hq = torch.load(hq_path, weights_only=True).clone()
             return lq, hq
 
         lq_path, hq_path = self.pairs[idx]
@@ -171,7 +171,7 @@ class RESIDEDataset(Dataset):
             lq, hq = self._joint_aug(lq, hq)
         else:
             # 验证/测试阶段严格保持原始分辨率，不做 resize/pad。
-            return self.to_tensor(lq), self.to_tensor(hq)
+            return self.to_tensor(lq).clone(), self.to_tensor(hq).clone()
 
         return self.to_tensor(lq), self.to_tensor(hq)
 

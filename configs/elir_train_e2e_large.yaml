@@ -1,0 +1,129 @@
+# 端到端训练：FMIR + MMSE + Decoder (WaveletStem→TanhSFT) 联合优化
+# 损失：FM 流匹配 + Charbonnier + SSIM + LPIPS 感知 + Hinge GAN
+#
+# 用法：
+#   python train.py -y configs/elir_train_e2e_large.yaml
+
+env_cfg:
+  run_name: elir_e2e_large_band
+  project_name: elir
+  task: e2e
+  out_dir: ./runs
+  seed: 2025
+
+dataset_cfg:
+  train_dataset:
+    name: RESIDE
+    path: ~/moxt/DiffUIR/Datasets/Restoration/RESIDE/OTS_ALPHA/train
+    lq_subdir: lq
+    hq_subdir: hq
+    patch_size: 512
+    batch_size: 4
+    num_workers: 4
+    training: true
+    use_latent_cache: false
+  val_dataset:
+    name: Paired
+    path: ~/moxt/DiffUIR/Datasets/Restoration/RESIDE/SOTS/outdoor/test/val
+    lq_subdir: haze
+    hq_subdir: clear
+    patch_size: 512
+    batch_size: 1
+    num_workers: 1
+    training: false
+    use_latent_cache: false
+
+fm_cfg:
+  method: e2e_gan
+  k_steps: 5
+  t_emb_dim: 160
+  sigma_min: 0.00001
+  sigma_s: 0.1
+  dt: 0.05
+  alpha: 0.001
+  beta: 0.001
+  lambda_pix_max: 0.5
+  lambda_pix_warmup_steps: 10000
+  detach_latent_path: false
+  # 像素损失权重
+  lambda_charb: 1.0
+  lambda_ssim: 0.5
+  # 感知损失（LPIPS AlexNet，无 pip install lpips 时回退 VGG19）
+  lambda_perc: 0.1
+  prefer_lpips: true
+  # 对抗损失
+  lambda_gan: 0.01
+  d_lr: 0.00004
+  d_base_channels: 64
+  d_n_layers: 3
+  # GAN/感知 warmup：前 N 步 λ 线性从 0 增长到目标值
+  gan_perc_warmup_steps: 20000
+  # 梯度裁剪
+  gradient_clip_val: 1.0
+  grad_accum: 4
+
+model_cfg:
+  arch_cfg:
+    name: elir
+    params:
+      fm_cfg: {k_steps: 5, sigma_s: 0.1, latent_shape: [16,64,64], seed: 2025,
+               dynamic_noise: true, force_static_noise: false,
+               detach_latent_path: false}
+      fmir_cfg:
+        name: lunet
+        params: {ch_mult: [1,2,2,2], n_mid_blocks: 4, in_channels: 16, hid_channels: 192,
+                 out_channels: 16, t_emb_dim: 160, overparametrization: false,
+                 use_checkpoint: true}
+        trainable: true
+      mmse_cfg:
+        name: rrdbnet
+        params: {c_inout: 16, c_hid: 128, n_rrdb: 4, overparametrization: True}
+        trainable: true
+      enc_cfg:
+        name: taesd
+        trainable: false
+      dec_cfg:
+        name: sft_taesd_finetuner
+        path:
+        trainable: true
+        params:
+          latent_channels: 16
+          gamma_scale: 0.1
+          beta_scale: 0.1
+      wavelet_cfg:
+        enabled: true
+        in_channels: 3
+        base_channels: 16
+        trainable: true
+        band_attn: true
+        fmir_use_wavelet_cond: true
+    path:
+  teacher_cfg:
+    name: taesd
+    params: {}
+    trainable: false
+
+train_cfg:
+  train_mode: e2e
+  epochs: -1
+  ckpt_path: /home/a27/moxt/elir_sftunet_ED/runs/elir_e2e_large_band/epoch=41-step=252840.ckpt
+  optimizer: !name:torch.optim.AdamW
+  lr: 0.0001
+  optimizer_params: {}
+  ema_decay: 0.999
+  max_steps: 300000
+  accumulate_grad_batches: 1
+  check_val_every_n_epoch: 10
+  num_sanity_val_steps: 2
+  wandb: false
+  logger: csv
+  save_images: false
+  save_weights_only: true
+  strategy: auto
+  devices: 1
+  accelerator: gpu
+
+eval_cfg:
+  metrics: [psnr, fid, ssim]
+  save_images: false
+  max_save_images: 4

@@ -338,8 +338,8 @@ class PairedDataset(Dataset):
         if self.use_latent_cache:
             lq_path = self.lq_pt_paths[idx]
             hq_path = self.hq_pt_paths[idx]
-            lq = torch.load(lq_path, weights_only=True)
-            hq = torch.load(hq_path, weights_only=True)
+            lq = torch.load(lq_path, weights_only=True).clone()
+            hq = torch.load(hq_path, weights_only=True).clone()
             return lq, hq
 
         lq_path, hq_path = self.pairs[idx]
@@ -352,7 +352,7 @@ class PairedDataset(Dataset):
             hq = self.pad(hq)
         else:
             # Validation/test must keep exact original resolution.
-            return self.to_tensor(lq), self.to_tensor(hq)
+            return self.to_tensor(lq).clone(), self.to_tensor(hq).clone()
 
         return self.to_tensor(lq), self.to_tensor(hq)
 

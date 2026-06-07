@@ -3,16 +3,38 @@ import torch
 
 def get_optimizer(train_cfg, model):
     lr = train_cfg.get("lr", 0.0001)
+    enc_lr_mult = float(train_cfg.get("enc_lr_mult", 0.1))
     optimizer_params = train_cfg.get("optimizer_params", {})
-    optimizer_params['lr'] = lr
-    params = [p for p in model.parameters() if p.requires_grad]
-    if len(params) == 0:
-        raise ValueError("No trainable parameters found after filtering requires_grad=False.")
+
+    # 拆分 Encoder 参数和其他参数，Encoder 用更低的学习率
+    enc_params = []
+    other_params = []
+    for n, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if n.startswith("enc."):
+            enc_params.append(p)
+        else:
+            other_params.append(p)
+
+    if len(other_params) + len(enc_params) == 0:
+        raise ValueError("No trainable parameters found.")
+
+    param_groups = [
+        {"params": other_params, "lr": lr, **optimizer_params},
+    ]
+    if enc_params:
+        param_groups.append({
+            "params": enc_params,
+            "lr": lr * enc_lr_mult,
+            **{k: v for k, v in optimizer_params.items() if k != "lr"},
+        })
+
     optimizer = train_cfg.get("optimizer", None)
     if optimizer:
-        return optimizer(params, **optimizer_params)
+        return optimizer(param_groups)
     else:
-        return torch.optim.Adam(params, **optimizer_params)
+        return torch.optim.Adam(param_groups)
 
 def get_scheduler(train_cfg, optimizer):
     scheduler_params = train_cfg.get("scheduler_params", {})

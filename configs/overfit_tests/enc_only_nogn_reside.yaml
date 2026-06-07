@@ -1,0 +1,127 @@
+# 过拟合测试：5张图200步快速验证新模块是否有用
+# 用法：python train.py -y configs/elir_overfit_test.yaml
+
+env_cfg:
+  run_name: ovft_enc_only_nogn_reside
+  project_name: elir
+  task: e2e
+  out_dir: ./runs
+  seed: 2025
+
+dataset_cfg:
+  train_dataset:
+    name: RESIDE
+    path: ~/moxt/DiffUIR/Datasets/Restoration/RESIDE/OTS_ALPHA/train
+    lq_subdir: lq
+    hq_subdir: hq
+    patch_size: 128
+    batch_size: 4
+    num_workers: 2
+    training: true
+    use_latent_cache: false
+  val_dataset:
+    name: Paired
+    path: ~/moxt/DiffUIR/Datasets/Restoration/RESIDE/SOTS/outdoor/test/val
+    lq_subdir: lq
+    hq_subdir: hq
+    patch_size: 128
+    batch_size: 1
+    num_workers: 1
+    training: false
+    use_latent_cache: false
+
+fm_cfg:
+  method: e2e_gan
+  k_steps: 5
+  t_emb_dim: 160
+  sigma_min: 0.00001
+  sigma_s: 0.1
+  dt: 0.05
+  alpha: 0.001
+  beta: 0.001
+  lambda_pix_max: 0.5
+  lambda_pix_warmup_steps: 50
+  detach_latent_path: false
+  lambda_charb: 1.0
+  lambda_ssim: 0.5
+  lambda_color: 0.05
+  lambda_blur: 0.05
+  lambda_dino: 0.0
+  prefer_lpips: true
+  lambda_perc: 0.0
+  lambda_gan: 0.0
+  d_lr: 0.00004
+  lr_min_ratio: 0.01
+  d_base_channels: 64
+  d_n_layers: 3
+  gan_perc_warmup_steps: 50
+  gradient_clip_val: 1.0
+  grad_accum: 1
+
+model_cfg:
+  arch_cfg:
+    name: elir
+    params:
+      fm_cfg: {k_steps: 5, sigma_s: 0.1, latent_shape: [16,64,64], seed: 2025,
+               dynamic_noise: true, force_static_noise: false,
+               detach_latent_path: false, dino_align: false}
+      fmir_cfg:
+        name: lunet
+        params: {ch_mult: [1,2,2,2], n_mid_blocks: 4, in_channels: 16, hid_channels: 192,
+                 out_channels: 16, t_emb_dim: 160, overparametrization: false,
+                 use_checkpoint: false, use_attn: false, attn_heads: 8,
+                 use_time_dilate: false}
+        trainable: true
+      mmse_cfg:
+        name: rrdbnet
+        params: {c_inout: 16, c_hid: 128, n_rrdb: 4, overparametrization: true}
+        trainable: true
+      enc_cfg:
+        name: taesd
+        trainable: true
+        use_enc_gn: false
+      dec_cfg:
+        name: sft_taesd_finetuner
+        path:
+        trainable: true
+        params:
+          latent_channels: 16
+          gamma_scale: 0.1
+          beta_scale: 0.1
+      wavelet_cfg:
+        enabled: true
+        in_channels: 3
+        base_channels: 16
+        trainable: true
+        band_attn: true
+        fmir_use_wavelet_cond: true
+    path:
+  teacher_cfg:
+    name: taesd
+    params: {}
+    trainable: false
+
+train_cfg:
+  train_mode: e2e
+  epochs: -1
+  ckpt_path:
+  optimizer: !name:torch.optim.AdamW
+  lr: 0.0005
+  optimizer_params: {}
+  ema_decay: 0.999
+  max_steps: 200
+  accumulate_grad_batches: 1
+  check_val_every_n_epoch: 1
+  num_sanity_val_steps: 0
+  wandb: false
+  logger: csv
+  save_images: false
+  save_weights_only: true
+  strategy: auto
+  devices: 1
+  accelerator: gpu
+
+eval_cfg:
+  metrics: [psnr, ssim]
+  save_images: false
+  max_save_images: 2
