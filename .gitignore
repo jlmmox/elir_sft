@@ -19,4 +19,8 @@ __pycache__/
 runs/
 results/
 logs/
-wandb/
+wandb/traj_lol/
+traj_lol_old/
+*.zip
+elir.pdf
+cross_project_training_report.json
