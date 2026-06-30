@@ -1,0 +1,2 @@
+diag_sft_hq_psnr_full,diag_sft_mmse_psnr_full,epoch,fid,flow_gain_psnr,global_step,gpu_peak_allocated_gb,latent_delta_cosine,latent_diag_K,latent_gain_charb,psnr,ssim,step
+19.515762329101562,30.298412322998047,0,12.415390968322754,0.8140883445739746,0.0,5.917698860168457,0.2153671830892563,15.0,0.00812468770891428,31.11250114440918,0.9057884216308594,0

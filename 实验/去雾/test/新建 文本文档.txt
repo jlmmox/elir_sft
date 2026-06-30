@@ -1,0 +1,1 @@
+/home/a27/moxt/elir_sftunet_ED/runs/elir_e2e_large_dehaze/epoch=4-step=60200.ckpt

@@ -171,10 +171,19 @@ class Block2D(nn.Module):
 
 class ResnetBlock2D(nn.Module):
     def __init__(self, in_channels, out_channels, time_dim, overparametrization=False,
-                 use_time_dilate=False):
+                 use_time_dilate=False, use_film=False):
         super().__init__()
         self.use_time_dilate = bool(use_time_dilate)
-        self.mlp = nn.Sequential(nn.SiLU(), nn.Linear(time_dim, out_channels))
+        self.use_film = bool(use_film)
+        if self.use_film:
+            self.mlp = nn.Sequential(nn.SiLU(), nn.Linear(time_dim, out_channels * 2))
+            # gamma=0 (无缩放), beta=normal init (有时间偏置, 等价原加法模式)
+            nn.init.kaiming_normal_(self.mlp[1].weight, mode='fan_in', nonlinearity='linear')
+            with torch.no_grad():
+                self.mlp[1].weight[:out_channels] *= 0.0     # gamma: zero
+            nn.init.zeros_(self.mlp[1].bias)
+        else:
+            self.mlp = nn.Sequential(nn.SiLU(), nn.Linear(time_dim, out_channels))
         self.block1 = Block2D(in_channels, out_channels, overparametrization=overparametrization)
         self.block2 = Block2D(out_channels, out_channels, overparametrization=overparametrization)
         self.conv2d = nn.Conv2d(in_channels, out_channels, kernel_size=1)
@@ -184,7 +193,13 @@ class ResnetBlock2D(nn.Module):
 
     def forward(self, x, emb):
         h = self.block1(x)
-        h += self.mlp(emb).unsqueeze(-1).unsqueeze(-1)
+        if self.use_film:
+            t = self.mlp(emb)                                          # [B, 2C]
+            gamma, beta = t.chunk(2, dim=1)                           # [B, C] each
+            h = h * (1.0 + gamma.unsqueeze(-1).unsqueeze(-1)) \
+                + beta.unsqueeze(-1).unsqueeze(-1)
+        else:
+            h += self.mlp(emb).unsqueeze(-1).unsqueeze(-1)
         h = self.block2(h)
         if self.use_time_dilate:
             h = h + self.dilated_conv(h, emb)
@@ -225,28 +240,29 @@ class TanhSFT(nn.Module):
         nn.init.zeros_(self.beta_head.weight)
         nn.init.zeros_(self.beta_head.bias)
 
-    def forward(self, feat, cond, w=1.0):
+    def _zero_init(self):
+        """显式零初始化 alpha/beta head（供 checkpoint skip_prefixes 后重置用）。"""
+        nn.init.zeros_(self.gamma_head.weight)
+        nn.init.zeros_(self.gamma_head.bias)
+        nn.init.zeros_(self.beta_head.weight)
+        nn.init.zeros_(self.beta_head.bias)
+        # shared conv 用 Kaiming 重置
+        for mod in self.shared:
+            if isinstance(mod, nn.Conv2d):
+                nn.init.kaiming_normal_(mod.weight, mode="fan_out", nonlinearity="relu")
+                if mod.bias is not None:
+                    nn.init.zeros_(mod.bias)
+
+    def forward(self, feat, cond):
         if cond is None:
             return feat
         if cond.shape[-2:] != feat.shape[-2:]:
-            # Align condition map to feature resolution to support variable-size inputs.
             cond = F.interpolate(cond, size=feat.shape[-2:], mode="bilinear", align_corners=False)
         h = self.shared(cond)
         gamma = torch.tanh(self.gamma_head(h)) * self.gamma_scale
         beta = torch.tanh(self.beta_head(h)) * self.beta_scale
         gamma = gamma.to(device=feat.device, dtype=feat.dtype)
         beta = beta.to(device=feat.device, dtype=feat.dtype)
-
-        if not torch.is_tensor(w):
-            w = torch.tensor(float(w), device=feat.device, dtype=feat.dtype).view(1, 1, 1, 1)
-        w = w.to(device=feat.device, dtype=feat.dtype)
-        if w.ndim == 0:
-            w = w.view(1, 1, 1, 1)
-        if w.ndim == 1:
-            w = w.view(-1, 1, 1, 1)
-
-        gamma = gamma * w
-        beta = beta * w
         return feat * (1.0 + gamma) + beta
 
 
@@ -257,7 +273,9 @@ class LUnet(nn.Module):
                  cond_base_channels=16, cond_pyramid_channels=(16, 32, 64),
                  gate_w_min=0.1, gate_p=1.5, sft_gamma_scale=0.2, sft_beta_scale=0.2,
                  use_checkpoint=False, use_attn=False, attn_heads=8,
-                 use_time_dilate=False, use_dwt_skip=False):
+                 use_time_dilate=False, use_dwt_skip=False,
+                 use_film=False, use_latent_cond=False,
+                 zero_init_velocity_head=False):
         super(LUnet, self).__init__()
         self.overparametrization = overparametrization
         self.t_emb_dim = t_emb_dim
@@ -266,6 +284,8 @@ class LUnet(nn.Module):
         self.use_checkpoint = bool(use_checkpoint)
         self.use_attn = bool(use_attn)
         self.use_time_dilate = bool(use_time_dilate)
+        self.use_film = bool(use_film)
+        self.use_latent_cond = bool(use_latent_cond)
         self.gate_w_min = float(gate_w_min)
         self.gate_p = float(gate_p)
         _ = cond_downscale_factor  # 保留参数兼容旧配置，当前原生尺寸方案不使用该参数。
@@ -279,10 +299,18 @@ class LUnet(nn.Module):
 
         self.first_proj = nn.Conv2d(in_channels, hid_channels, kernel_size=1)
 
+        # 潜在空间条件增强：将 z_lq 和 z_mmse - z_lq 注入特征流
+        # zero-init → 初始等价于无 latent cond 的标准行为
+        self.latent_cond_proj = None
+        if self.use_latent_cond:
+            self.latent_cond_proj = nn.Conv2d(32, hid_channels, kernel_size=1)
+            nn.init.zeros_(self.latent_cond_proj.weight)
+            nn.init.zeros_(self.latent_cond_proj.bias)
+
         # Down blocks
         chs = hid_channels
         for mult in ch_mult:
-            resnet = ResnetBlock2D(chs, chs, time_dim_out, overparametrization=overparametrization, use_time_dilate=self.use_time_dilate)
+            resnet = ResnetBlock2D(chs, chs, time_dim_out, overparametrization=overparametrization, use_time_dilate=self.use_time_dilate, use_film=self.use_film)
             self._down_feat_channels.append(chs)
             if mult!=1:
                 downsample = Downsample(chs, mult * chs, use_conv=use_rescale_conv)
@@ -295,7 +323,7 @@ class LUnet(nn.Module):
 
         # Mid blocks
         for i in range(n_mid_blocks):
-            resnet = ResnetBlock2D(chs, chs, time_dim_out, overparametrization=overparametrization, use_time_dilate=self.use_time_dilate)
+            resnet = ResnetBlock2D(chs, chs, time_dim_out, overparametrization=overparametrization, use_time_dilate=self.use_time_dilate, use_film=self.use_film)
             self.mid_blocks.append(resnet)
 
         # Bottleneck attention (插在 mid blocks 之后, 低分辨率全局交互)
@@ -310,7 +338,7 @@ class LUnet(nn.Module):
                 chs = chs // mult
             else:
                 upsample = nn.Identity()
-            resnet = ResnetBlock2D(2*chs, chs, time_dim_out, overparametrization=overparametrization, use_time_dilate=self.use_time_dilate)
+            resnet = ResnetBlock2D(2*chs, chs, time_dim_out, overparametrization=overparametrization, use_time_dilate=self.use_time_dilate, use_film=self.use_film)
             self._up_feat_channels.append(chs)
             self.up_blocks.append(nn.ModuleList([upsample, resnet]))
 
@@ -324,6 +352,11 @@ class LUnet(nn.Module):
 
         self.final_block = Block2D(chs, chs, overparametrization=overparametrization)
         self.final_proj = nn.Conv2d(chs, out_channels, kernel_size=1)
+        self.zero_init_velocity_head = bool(zero_init_velocity_head)
+        if self.zero_init_velocity_head:
+            nn.init.zeros_(self.final_proj.weight)
+            if self.final_proj.bias is not None:
+                nn.init.zeros_(self.final_proj.bias)
 
         if self.use_cgfm:
             if len(cond_pyramid_channels) == 3:
@@ -418,14 +451,6 @@ class LUnet(nn.Module):
                 for idx, key in enumerate(self._up_cond_keys)
             ])
 
-    def time_gate(self, t):
-        if t is None:
-            return 1.0
-        if not torch.is_tensor(t):
-            t = torch.tensor(float(t), dtype=torch.float32)
-        t = t.float()
-        return self.gate_w_min + (1.0 - self.gate_w_min) * torch.pow(1.0 - t, self.gate_p)
-
     def make_condition(self, x_lq):
         if (not self.use_cgfm) or x_lq is None:
             return None
@@ -494,7 +519,19 @@ class LUnet(nn.Module):
     def forward(self, xt, t_emb, cond=None, t=None):
         emb = self.time_mlp(t_emb)
         x = self.first_proj(xt)
-        w_t = self.time_gate(t)
+
+        # ---- 潜在空间条件增强：z_lq + z_mmse - z_lq → zero-init 投影 → 残差注入 ----
+        if self.latent_cond_proj is not None and isinstance(cond, dict):
+            latent_lq = cond.get("latent_lq")
+            latent_delta = cond.get("latent_mmse_delta")
+            if latent_lq is not None and latent_delta is not None:
+                latent_info = torch.cat([latent_lq, latent_delta], dim=1)
+                # 对齐空间尺寸（latent 通常为 32×32，需与 x 对齐）
+                if latent_info.shape[-2:] != x.shape[-2:]:
+                    latent_info = F.interpolate(
+                        latent_info, size=x.shape[-2:], mode="bilinear", align_corners=False
+                    )
+                x = x + self.latent_cond_proj(latent_info)
 
         cond256 = None
         cond128 = None
@@ -513,14 +550,14 @@ class LUnet(nn.Module):
             x = self._run_with_checkpoint(resnet, x, emb)
             if self.use_cgfm and idx > 0:
                 down_key = self._down_cond_keys[idx]
-                x = self.sft_down[idx](x, cond_map.get(down_key), w_t)
+                x = self.sft_down[idx](x, cond_map.get(down_key))
             skip_connect.append(x)
             x = downsample(x)
         # Mid blocks
         for mid_idx, resnet in enumerate(self.mid_blocks):
             x = self._run_with_checkpoint(resnet, x, emb)
             if self.use_cgfm:
-                x = self.sft_mid[mid_idx](x, cond_map.get(self._mid_cond_key), w_t)
+                x = self.sft_mid[mid_idx](x, cond_map.get(self._mid_cond_key))
         if self.mid_attn is not None:
             x = self.mid_attn(x)
         # Up blocks
@@ -538,7 +575,7 @@ class LUnet(nn.Module):
             x = self._run_with_checkpoint(resnet, x, emb)
             if self.use_cgfm and up_idx > 0:
                 up_key = self._up_cond_keys[up_idx]
-                x = self.sft_up[up_idx](x, cond_map.get(up_key), w_t)
+                x = self.sft_up[up_idx](x, cond_map.get(up_key))
         x = self._run_with_checkpoint(self.final_block, x)
         x = self.final_proj(x)
         return x

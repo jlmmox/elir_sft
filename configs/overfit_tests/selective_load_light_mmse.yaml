@@ -1,0 +1,184 @@
+# Selective Loading + Light MMSE + Flow Matching
+# 从旧基线 checkpoint 仅继承 enc/dec/wavelet，
+# 重新初始化轻量 MMSE + FMIR，给 Flow Matching 留出可学习空间。
+#
+# 背景：
+#   旧 MMSE 太强 → z_hq - z_mmse residual 太小 → Flow 学不到方向
+#   → 用轻量 MMSE 降低 posterior-mean 精度，增大 residual
+#   → Flow Matching 有机会学到有效 refinement
+#
+# 判断标准（3000 step）：
+#   diag_sft_hq_psnr_full ≈ 31          → encoder/decoder 基座加载正确
+#   diag_sft_mmse_psnr_full ≈ 21.5~22.8 → 轻量 MMSE，residual 更大
+#   latent_target_delta_norm 增大       → residual 比旧强 MMSE 大
+#   latent_delta_cosine 从 0.05 → 0.15+ → Flow 学到了有效方向
+#   MMSE + Flow PSNR > MMSE-only PSNR   → Flow 有正向贡献
+#
+# 用法：
+#   python train.py -y configs/overfit_tests/selective_load_light_mmse.yaml
+
+env_cfg:
+  run_name: ovft_selective_load_light_mmse
+  project_name: elir
+  task: e2e
+  out_dir: ./runs
+  seed: 2025
+
+dataset_cfg:
+  train_dataset:
+    name: LOL
+    path: ~/moxt/DiffUIR/Datasets/Restoration/LOL/train
+    lq_subdir: low
+    hq_subdir: high
+    patch_size: 256
+    batch_size: 8
+    num_workers: 8
+    training: true
+    use_latent_cache: false
+  val_dataset:
+    name: LOL
+    path: ~/moxt/DiffUIR/Datasets/Restoration/LOL/test
+    lq_subdir: low
+    hq_subdir: high
+    patch_size: 256
+    batch_size: 4
+    num_workers: 4
+    training: false
+    use_latent_cache: false
+
+fm_cfg:
+  method: e2e_gan
+  k_steps: 5
+  t_emb_dim: 160
+  sigma_min: 0.00001
+
+  # ==== Calibrated One-Step Flow Inference ====
+  # "ode" = K-step ODE (default); "one_step" = posterior-mean anchored rectified update
+  inference_mode: one_step
+  flow_infer_scale: 2.0
+  inference_t: 0.0
+
+  # ==== PMRF-style low-t Flow Matching ====
+  sigma_s: 0.0
+  t_sampling: low_t
+  t_min: 0.0
+  t_max: 0.3
+
+  # ==== 损失权重 ====
+  lambda_fm: 1.0
+  lambda_mmse_char: 1.0
+  dt: 0.05
+  alpha: 0.001
+  beta: 0.0
+
+  # ==== Low-t endpoint 辅助 ====
+  lambda_low_t_endpoint: 1.0
+  low_t_endpoint_t: 0.0
+
+  # ==== PMRF MMSE fidelity guard ====
+  lambda_mmse_guard: 1.0
+
+  # ==== 潜在空间条件增强 ====
+  use_latent_cond: true
+
+  # ==== Bridge / Pixel / GAN 全部关闭 ====
+  lambda_bridge: 0.0
+  lambda_final_latent: 0.0
+  bridge_sigma_s: 0.0
+  lambda_pix_max: 0.0
+  lambda_charb: 0.0
+  lambda_ssim: 0.0
+  lambda_color: 0.0
+  lambda_blur: 0.0
+  lambda_perc: 0.0
+  lambda_gan: 0.0
+  lambda_dino: 0.0
+  dino_align: false
+  dino_perceptual: false
+  sk_fusion: false
+
+  d_lr: 0.00004
+  lr_min_ratio: 0.01
+  gan_perc_warmup_steps: 20000
+  gradient_clip_val: 1.0
+  grad_accum: 1
+
+model_cfg:
+  arch_cfg:
+    name: elir
+    params:
+      fm_cfg: {k_steps: 5, sigma_s: 0.0, latent_shape: [16,64,64], seed: 2025,
+               dynamic_noise: true, force_static_noise: false,
+               detach_latent_path: false,
+               use_latent_cond: true,
+               inference_mode: one_step, flow_infer_scale: 2.0, inference_t: 0.0}
+      fmir_cfg:
+        name: lunet
+        params: {ch_mult: [1,2,2,2], n_mid_blocks: 4, in_channels: 16, hid_channels: 192,
+                 out_channels: 16, t_emb_dim: 160, overparametrization: false,
+                 use_checkpoint: false, use_attn: false, attn_heads: 8,
+                 use_time_dilate: false}
+        trainable: true
+      mmse_cfg:
+        name: rrdbnet
+        params: {c_inout: 16, c_hid: 128, n_rrdb: 4, overparametrization: true}
+        trainable: true
+      enc_cfg:
+        name: taesd
+        trainable: false
+      dec_cfg:
+        name: sft_taesd_finetuner
+        path:
+        trainable: false
+        params:
+          latent_channels: 16
+          gamma_scale: 0.1
+          beta_scale: 0.1
+      wavelet_cfg:
+        enabled: true
+        in_channels: 3
+        base_channels: 16
+        trainable: false
+        mode: lfg_sfg
+        band_attn: true
+        fmir_use_wavelet_cond: true
+        gate_bias_init: -4.0
+        hf_init: small
+    path:
+  teacher_cfg:
+    name: taesd
+    params: {}
+    trainable: false
+
+train_cfg:
+  train_mode: manual
+  epochs: -1
+  # ==== 选择性加载：继承 enc/dec/wavelet/condition_stem，跳过 mmse/fmir ====
+  ckpt_path: /home/a27/moxt/elir_sftunet_ED/runs/ovft_lfg_sfg/epoch=256-step=31097.ckpt
+  load_modules_from_ckpt: [enc, dec, wavelet, fmir_condition]
+  skip_modules_from_ckpt: [mmse, fmir]
+  # ==== Fresh optimizer & no EMA ====
+  optimizer: !name:torch.optim.AdamW
+  lr: 0.0003
+  optimizer_params: {}
+  ema_decay: 0
+  max_steps: 3000
+  accumulate_grad_batches: 1
+  check_val_every_n_epoch: 10
+  num_sanity_val_steps: 2
+  wandb: false
+  logger: csv
+  save_images: false
+  save_weights_only: true
+  strategy: auto
+  devices: 1
+  accelerator: gpu
+
+eval_cfg:
+  metrics: [psnr, fid, ssim]
+  save_images: false
+  max_save_images: 5
+  # FMIR scale sweep 诊断（精细扫描 1.0–3.0 区间找最优 flow_infer_scale）
+  fmir_scale_sweep: [0.5, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 5, 10]
+  fmir_scale_sweep_t: 0.0
+  fmir_scale_sweep_use_cond: true

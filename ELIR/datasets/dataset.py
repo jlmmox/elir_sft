@@ -44,6 +44,9 @@ def get_loader(ds_params):
     elif ds_name == "LOL":
         from ELIR.datasets.lol import LOL
         dl = LOL().create_loaders(ds_params)
+    elif ds_name == "Denoising":
+        from ELIR.datasets.denoising import Denoising
+        dl = Denoising().create_loaders(ds_params)
     else:
         raise Exception("Dataset is unknown!")
 
@@ -240,6 +243,7 @@ class PairedDataset(Dataset):
         pad_to_multiple=8,
         extensions=("png", "jpg", "jpeg"),
         use_latent_cache=False,
+        lq_to_hq_name=None,      # dict: {"norain": "rain"} → str.replace
     ):
         super().__init__()
         self.roots = self._normalize_roots(root)
@@ -249,6 +253,7 @@ class PairedDataset(Dataset):
         self.training = training
         self.use_latent_cache = use_latent_cache
         self.extensions = tuple(f".{ext.lower().lstrip('.')}" for ext in extensions)
+        self.lq_to_hq_name = lq_to_hq_name or {}
         self.to_tensor = v2.ToTensor()
         self.pad = Padding2Multiple(pad_to_multiple=pad_to_multiple)
         if self.use_latent_cache:
@@ -278,9 +283,14 @@ class PairedDataset(Dataset):
 
             for lq_path in lq_files:
                 fname = os.path.relpath(lq_path, lq_root)
-                hq_path = os.path.join(hq_root, fname)
+                hq_name = fname
+                for old, new in self.lq_to_hq_name.items():
+                    hq_name = hq_name.replace(old, new)
+                hq_path = os.path.join(hq_root, hq_name)
                 if not os.path.isfile(hq_path):
-                    raise FileNotFoundError(f"Missing HQ pair for {lq_path}")
+                    raise FileNotFoundError(
+                        f"Missing HQ pair for {lq_path} (tried {hq_path})\n"
+                        f"  Hint: set lq_to_hq_name in dataset config if LQ/HQ filenames differ.")
                 pairs.append((lq_path, hq_path))
 
         if len(pairs) == 0:
@@ -372,11 +382,13 @@ class Paired(BasicLoader):
         batch_size = dataset_params.get("batch_size", 8)
         num_workers = dataset_params.get("num_workers", 4)
         use_latent_cache = dataset_params.get("use_latent_cache", False)
+        lq_to_hq_name = dataset_params.get("lq_to_hq_name", None)
 
         dataset = PairedDataset(path, lq_subdir=lq_subdir, hq_subdir=hq_subdir,
                                 patch_size=patch_size, training=training,
                                 pad_to_multiple=pad_to_multiple, extensions=extensions,
-                                use_latent_cache=use_latent_cache)
+                                use_latent_cache=use_latent_cache,
+                                lq_to_hq_name=lq_to_hq_name)
 
         loader = DataLoader(dataset,
                             batch_size=batch_size,

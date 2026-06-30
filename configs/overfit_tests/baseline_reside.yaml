@@ -22,8 +22,8 @@ dataset_cfg:
   val_dataset:
     name: Paired
     path: ~/moxt/DiffUIR/Datasets/Restoration/RESIDE/SOTS/outdoor/test/val
-    lq_subdir: lq
-    hq_subdir: hq
+    lq_subdir: haze
+    hq_subdir: clear
     patch_size: 128
     batch_size: 1
     num_workers: 1
@@ -46,7 +46,7 @@ fm_cfg:
   lambda_ssim: 0.5
   lambda_color: 0.05
   lambda_blur: 0.05
-  lambda_dino: 0.0
+  lambda_dino: 0.1
   prefer_lpips: true
   lambda_perc: 0.0
   lambda_gan: 0.0

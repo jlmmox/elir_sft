@@ -16,6 +16,9 @@ dataset_cfg:
     training: false
     use_latent_cache: false
 
+fm_cfg:
+  method: e2e_gan
+
 model_cfg:
   arch_cfg:
     name: elir
@@ -48,19 +51,21 @@ model_cfg:
         enabled: true
         in_channels: 3
         base_channels: 16
-        use_ll: true
-        fuse_with_spatial: true
+        trainable: false
+        mode: lfg_sfg
         band_attn: true
         fmir_use_wavelet_cond: true
-        trainable: false
-        visualize: false
-    path: /home/a27/moxt/elir_sftunet_ED/runs/elir_e2e_large_lol_timedilate/epoch=319-step=9600.ckpt
+        gate_bias_init: -2.0
+        hf_init: small
+    path:
   teacher_cfg: null
 
+
 eval_cfg:
+  ckpt_path: /home/a27/moxt/elir_sftunet_ED/runs/elir_e2e_large_lol_encft_nodino/epoch=139-step=16800.ckpt
   image_size: 256
   metrics: [psnr, fid, ssim]
-  use_tta: false
+  use_tta: true
   save_images: false
   max_save_images: 4
   out_dir: ./runs/eval_e2e_large_lol

@@ -17,6 +17,7 @@ CSV 指标可视化脚本（只在 CSV 同级目录生成图片）
 使用（Windows 示例）：
 - 仅处理某个 run：
     python plot_metrics_csv.py --run "C:\\Users\\moxt\\OneDrive\\Desktop\\cfm实验\\rainy\\2"
+    python plot_metrics_csv.py --run "C:\\Users\\moxt\\OneDrive\\Desktop\elir\\elir_sftunet_ED\\lol_baseline\\trainm"
 - 扫描 logs 根目录（默认 logs）：
    python plot_metrics_csv.py --logs-dir "C:\\Users\\moxt\\OneDrive\\Desktop\\cfm实验\\elirruns\\test"   
 
@@ -74,7 +75,7 @@ def find_runs(logs_dir: str) -> List[Path]:
 
 def _detect_step_col(df: pd.DataFrame) -> str:
     """在 DataFrame 中检测 step 列，返回实际列名（保持原大小写）。"""
-    candidates = ["step", "global_step", "steps"]
+    candidates = ["global_step", "step"]
     for want in candidates:
         for col in df.columns:
             if col.lower() == want:

@@ -1,0 +1,168 @@
+# Experiment B: Calibrated one-step training — FMIR + Decoder 微调
+# 在 A 达到 ~24 PSNR 后，打开 decoder 小学习率联合微调。
+#
+# 用法：
+#   python train.py -y configs/overfit_tests/calib_b_fmir_dec.yaml
+
+env_cfg:
+  run_name: calib_b_fmir_dec
+  project_name: elir
+  task: e2e
+  out_dir: ./runs
+  seed: 2025
+
+dataset_cfg:
+  train_dataset:
+    name: LOL
+    path: ~/moxt/DiffUIR/Datasets/Restoration/LOL/train
+    lq_subdir: low
+    hq_subdir: high
+    patch_size: 256
+    batch_size: 4
+    num_workers: 4
+    training: true
+    use_latent_cache: false
+  val_dataset:
+    name: LOL
+    path: ~/moxt/DiffUIR/Datasets/Restoration/LOL/test
+    lq_subdir: low
+    hq_subdir: high
+    patch_size: 256
+    batch_size: 4
+    num_workers: 4
+    training: false
+    use_latent_cache: false
+
+fm_cfg:
+  method: e2e_gan
+  k_steps: 5
+  t_emb_dim: 160
+  sigma_min: 0.00001
+
+  # ==== One-step inference ====
+  inference_mode: one_step
+  flow_infer_scale: 1.5
+  inference_t: 0.0
+
+  # ==== PMRF-style low-t Flow Matching ====
+  sigma_s: 0.0
+  t_sampling: low_t
+  t_min: 0.0
+  t_max: 0.3
+
+  # ==== 损失权重 — Experiment B ====
+  lambda_fm: 0.1
+  lambda_mmse_char: 0.0
+  dt: 0.05
+  alpha: 0.001
+  beta: 0.0
+
+  lambda_low_t_endpoint: 0.3
+  low_t_endpoint_t: 0.0
+
+  lambda_mmse_guard: 0.2
+
+  lambda_calib_latent: 1.0
+  lambda_flow_img: 1.0
+  lambda_ssim_calib: 0.05
+
+  use_latent_cond: true
+
+  # Off
+  lambda_bridge: 0.0
+  lambda_final_latent: 0.0
+  bridge_sigma_s: 0.0
+  lambda_pix_max: 0.0
+  lambda_charb: 0.0
+  lambda_ssim: 0.0
+  lambda_color: 0.0
+  lambda_blur: 0.0
+  lambda_perc: 0.0
+  lambda_gan: 0.0
+  lambda_dino: 0.0
+  dino_align: false
+  dino_perceptual: false
+  sk_fusion: false
+
+  d_lr: 0.00004
+  lr_min_ratio: 0.01
+  gan_perc_warmup_steps: 20000
+  gradient_clip_val: 1.0
+  grad_accum: 2
+
+model_cfg:
+  arch_cfg:
+    name: elir
+    params:
+      fm_cfg: {k_steps: 5, sigma_s: 0.0, latent_shape: [16,64,64], seed: 2025,
+               dynamic_noise: true, force_static_noise: false,
+               detach_latent_path: false,
+               use_latent_cond: true,
+               inference_mode: one_step, flow_infer_scale: 1.5, inference_t: 0.0}
+      fmir_cfg:
+        name: lunet
+        params: {ch_mult: [1,2,2,2], n_mid_blocks: 4, in_channels: 16, hid_channels: 192,
+                 out_channels: 16, t_emb_dim: 160, overparametrization: false,
+                 use_checkpoint: false, use_attn: false, attn_heads: 8,
+                 use_time_dilate: false}
+        trainable: true
+      mmse_cfg:
+        name: rrdbnet
+        params: {c_inout: 16, c_hid: 128, n_rrdb: 4, overparametrization: true}
+        trainable: false
+      enc_cfg:
+        name: taesd
+        trainable: false
+      dec_cfg:
+        name: sft_taesd_finetuner
+        path:
+        trainable: true
+        params:
+          latent_channels: 16
+          gamma_scale: 0.1
+          beta_scale: 0.1
+      wavelet_cfg:
+        enabled: true
+        in_channels: 3
+        base_channels: 16
+        trainable: false
+        mode: lfg_sfg
+        band_attn: true
+        fmir_use_wavelet_cond: true
+        gate_bias_init: -4.0
+        hf_init: small
+    path:                            # 填入 Experiment A 最好 checkpoint 路径
+  teacher_cfg:
+    name: taesd
+    params: {}
+    trainable: false
+
+train_cfg:
+  train_mode: manual
+  epochs: -1
+  ckpt_path:                         # 填入 Experiment A 最好 checkpoint 路径
+  load_modules_from_ckpt: [enc, dec, wavelet, fmir_condition, mmse, fmir]
+  skip_modules_from_ckpt: []
+  optimizer: !name:torch.optim.AdamW
+  lr: 0.00005                        # FMIR 5e-5
+  optimizer_params: {}
+  ema_decay: 0
+  max_steps: 10000
+  accumulate_grad_batches: 2
+  check_val_every_n_epoch: 10
+  num_sanity_val_steps: 2
+  wandb: false
+  logger: csv
+  save_images: false
+  save_weights_only: true
+  strategy: auto
+  devices: 1
+  accelerator: gpu
+
+eval_cfg:
+  metrics: [psnr, ssim]
+  save_images: false
+  max_save_images: 5
+  fmir_scale_sweep: [1.0, 1.25, 1.5, 1.75, 2.0]
+  fmir_scale_sweep_t: 0.0
+  fmir_scale_sweep_use_cond: true

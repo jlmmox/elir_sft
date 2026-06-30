@@ -33,6 +33,19 @@ class TanhSFT_NoTime(nn.Module):
         nn.init.zeros_(self.beta_head.weight)
         nn.init.zeros_(self.beta_head.bias)
 
+    def _zero_init(self):
+        """显式零初始化 alpha/beta head（供 checkpoint skip_prefixes 后重置用）。"""
+        nn.init.zeros_(self.gamma_head.weight)
+        nn.init.zeros_(self.gamma_head.bias)
+        nn.init.zeros_(self.beta_head.weight)
+        nn.init.zeros_(self.beta_head.bias)
+        # shared conv 用 Kaiming 重置
+        for mod in self.shared:
+            if isinstance(mod, nn.Conv2d):
+                nn.init.kaiming_normal_(mod.weight, mode="fan_out", nonlinearity="relu")
+                if mod.bias is not None:
+                    nn.init.zeros_(mod.bias)
+
     def forward(self, feat: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
         if cond is None:
             raise ValueError("TanhSFT_NoTime requires a non-None cond tensor.")

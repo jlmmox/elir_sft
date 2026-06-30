@@ -1,0 +1,157 @@
+# 端到端训练（低光增强 / Low-light Enhancement - LOL）：FMIR + MMSE + Decoder (WaveletStem→TanhSFT) 联合优化
+# 损失：FM 流匹配 + Charbonnier + SSIM + LPIPS 感知 + Hinge GAN
+#
+# 用法：
+#   python train.py -y configs/lowlight/train.yaml
+
+env_cfg:
+  run_name: elir_e2e_large_lowlight
+  project_name: elir
+  task: lowlight
+  out_dir: ./runs
+  seed: 2025
+
+dataset_cfg:
+  train_dataset:
+    name: LOL
+    path: ~/moxt/DiffUIR/Datasets/Restoration/LOL/train
+    lq_subdir: low
+    hq_subdir: high
+    patch_size: 512
+    batch_size: 4
+    num_workers: 4
+    training: true
+    use_latent_cache: false
+  val_dataset:
+    name: LOL
+    path: ~/moxt/DiffUIR/Datasets/Restoration/LOL/test
+    lq_subdir: low
+    hq_subdir: high
+    patch_size: 512
+    batch_size: 1
+    num_workers: 1
+    training: false
+    use_latent_cache: false
+
+fm_cfg:
+  method: e2e_gan
+  k_steps: 5
+  lambda_fm: 1.0
+  lambda_mmse_char: 0.1
+  t_emb_dim: 160
+  sigma_min: 0.00001
+  sigma_s: 0.1
+  dt: 0.05
+  alpha: 0.001
+  beta: 0.001
+  lambda_pix_max: 1
+  lambda_pix_warmup_steps: 5000
+  detach_latent_path: false
+  # 像素损失权重
+  lambda_charb: 1.0
+  lambda_ssim: 0.5
+  lambda_color: 0.05
+  lambda_blur: 0
+  prefer_lpips: true
+  # 感知/对抗损失（PSNR 优化期全部关闭）
+  lambda_perc: 0
+  lambda_gan: 0.0
+  d_lr: 0.00004
+  d_base_channels: 64
+  d_n_layers: 3
+  # GAN/感知 warmup：前 N 步 λ 线性从 0 增长到目标值
+  gan_perc_warmup_steps: 20000
+  # 梯度裁剪
+  gradient_clip_val: 1.0
+  grad_accum: 1
+  dino_align: false
+  sk_fusion: false
+  dino_perceptual: false
+  lambda_dino: 0.0
+  # 训练控制
+  t_sampling: uniform
+  use_latent_cond: false
+  lr_min_ratio: 0.01
+  lambda_bridge: 0.0
+  lambda_final_latent: 0.0
+
+model_cfg:
+  arch_cfg:
+    name: elir
+    params:
+      fm_cfg: {k_steps: 5, sigma_s: 0.1, latent_shape: [16,64,64], seed: 2025,
+               dynamic_noise: false, force_static_noise: false,
+               detach_latent_path: false}
+      fmir_cfg:
+        name: lunet
+        params: {ch_mult: [1,2,2,2], n_mid_blocks: 4, in_channels: 16, hid_channels: 192,
+                 out_channels: 16, t_emb_dim: 160, overparametrization: false,
+                 use_checkpoint: true, use_attn: true, attn_heads: 8,
+                 use_time_dilate: false}
+        trainable: true
+      mmse_cfg:
+        name: rrdbnet
+        params: {c_inout: 16, c_hid: 128, n_rrdb: 4, overparametrization: True}
+        trainable: true
+      enc_cfg:
+        name: tiny_enc
+        trainable: true
+      dec_cfg:
+        name: sft_taesd_finetuner
+        path:
+        trainable: true
+        params:
+          latent_channels: 16
+          gamma_scale: 0.1
+          beta_scale: 0.1
+      wavelet_cfg:
+        enabled: true
+        in_channels: 3
+        base_channels: 16
+        trainable: true
+        band_attn: true
+        fmir_use_wavelet_cond: true
+    path:
+  teacher_cfg:
+    name: tiny_enc
+    params: {}
+    trainable: false
+
+train_cfg:
+  train_mode: e2e
+  epochs: -1
+  ckpt_path:
+  optimizer: !name:torch.optim.AdamW
+  lr: 0.0001
+  enc_lr_mult: 0.1
+  optimizer_params: {}
+  ema_decay: 0.999
+  max_steps: 400000
+  accumulate_grad_batches: 1
+  check_val_every_n_epoch: 1
+  num_sanity_val_steps: 2
+  wandb: false
+  logger: csv
+  save_images: false
+  save_weights_only: true
+  strategy: auto
+  devices: 1
+  accelerator: gpu
+  precision: "32-true"
+
+eval_cfg:
+  metrics: [psnr, fid, ssim]
+  save_images: false
+  max_save_images: 4
+
+log_cfg:
+  level: normal
+  train_log_interval: 100
+  grad_log_interval: 500
+  log_module_grad_norms: true
+  log_memory: false
+  debug_fmir_params: false
+  debug_fmir_updates: false
+  debug_cfm_details: false
+  debug_validation_graph: false
+  print_parameter_names: false

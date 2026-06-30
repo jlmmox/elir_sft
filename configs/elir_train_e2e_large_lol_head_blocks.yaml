@@ -1,0 +1,170 @@
+# head-blocks-only Sanity Test
+# 冻结 FMIR 大部分参数，仅解冻输出侧局部 blocks：
+#   latent_cond_proj + first_proj + last 2 up_blocks + 对应 sft_up
+#   + final_block + final_proj
+#
+# 目标：判断 FMIR 输出侧局部特征是否足以学到 z_mmse -> z_hq residual。
+#
+# 判断标准（1000 step）：
+#   cosine 提升到 0.15+   → 局部 head blocks 足够，可逐步扩大解冻范围
+#   cosine 停在 0.05       → 需要更深的特征或 residual adapter
+#   update_norm ≈ 0        → 冻结/optimizer 配置有问题
+#
+# 用法：
+#   python train.py -y configs/elir_train_e2e_large_lol_head_blocks.yaml
+
+env_cfg:
+  run_name: elir_e2e_large_lol_head_blocks
+  project_name: elir
+  task: e2e
+  out_dir: ./runs
+  seed: 2025
+
+dataset_cfg:
+  train_dataset:
+    name: LOL
+    path: ~/moxt/DiffUIR/Datasets/Restoration/LOL/train
+    lq_subdir: low
+    hq_subdir: high
+    patch_size: 256
+    batch_size: 8
+    num_workers: 8
+    training: true
+    use_latent_cache: false
+  val_dataset:
+    name: LOL
+    path: ~/moxt/DiffUIR/Datasets/Restoration/LOL/test
+    lq_subdir: low
+    hq_subdir: high
+    patch_size: 256
+    batch_size: 4
+    num_workers: 4
+    training: false
+    use_latent_cache: false
+
+fm_cfg:
+  method: e2e_gan
+  k_steps: 5
+  t_emb_dim: 160
+  sigma_min: 0.00001
+
+  # ==== 训练分布：PMRF-style low-t Flow Matching ====
+  sigma_s: 0.0
+  t_sampling: low_t
+  t_min: 0.0
+  t_max: 0.3
+
+  # ==== Flow Matching 保留 ====
+  lambda_fm: 1.0
+  lambda_mmse_char: 0.0
+  dt: 0.05
+  alpha: 0.001
+  beta: 0.0
+
+  # ==== Low-t endpoint 辅助 ====
+  lambda_low_t_endpoint: 1.0
+  low_t_endpoint_t: 0.0
+
+  # ==== PMRF MMSE fidelity guard ====
+  lambda_mmse_guard: 1.0
+
+  # ==== 潜在空间条件增强 ====
+  use_latent_cond: true
+
+  # ==== head-blocks-only 诊断模式 ====
+  train_fmir_head_blocks_only: true
+
+  # ==== Bridge / Pixel / GAN 全部关闭 ====
+  lambda_bridge: 0.0
+  lambda_final_latent: 0.0
+  bridge_sigma_s: 0.0
+  lambda_pix_max: 0.0
+  lambda_charb: 0.0
+  lambda_ssim: 0.0
+  lambda_color: 0.0
+  lambda_blur: 0.0
+  lambda_perc: 0.0
+  lambda_gan: 0.0
+  lambda_dino: 0.0
+  dino_align: false
+  dino_perceptual: false
+  sk_fusion: false
+
+  d_lr: 0.00004
+  lr_min_ratio: 0.01
+  gan_perc_warmup_steps: 20000
+  gradient_clip_val: 1.0
+  grad_accum: 1
+
+model_cfg:
+  arch_cfg:
+    name: elir
+    params:
+      fm_cfg: {k_steps: 5, sigma_s: 0.0, latent_shape: [16,64,64], seed: 2025,
+               dynamic_noise: true, force_static_noise: false,
+               detach_latent_path: false,
+               use_latent_cond: true}
+      fmir_cfg:
+        name: lunet
+        params: {ch_mult: [1,2,2,2], n_mid_blocks: 4, in_channels: 16, hid_channels: 192,
+                 out_channels: 16, t_emb_dim: 160, overparametrization: false,
+                 use_checkpoint: true, use_attn: true, attn_heads: 8,
+                 use_time_dilate: false,
+                 use_latent_cond: true}
+        trainable: true
+      mmse_cfg:
+        name: rrdbnet
+        params: {c_inout: 16, c_hid: 128, n_rrdb: 4, overparametrization: true}
+        trainable: false
+      enc_cfg:
+        name: taesd
+        trainable: false
+      dec_cfg:
+        name: sft_taesd_finetuner
+        path:
+        trainable: false
+        params:
+          latent_channels: 16
+          gamma_scale: 0.1
+          beta_scale: 0.1
+      wavelet_cfg:
+        enabled: true
+        in_channels: 3
+        base_channels: 16
+        trainable: false
+        band_attn: true
+        fmir_use_wavelet_cond: true
+    path:                            # 填入 low-t 训练 1000 step 后的 ckpt 路径
+  teacher_cfg:
+    name: taesd
+    params: {}
+    trainable: false
+
+train_cfg:
+  train_mode: manual
+  epochs: -1
+  ckpt_path: /home/a27/moxt/elir_sftunet_ED/runs/ovft_lfg_sfg/epoch=256-step=31097.ckpt
+  optimizer: !name:torch.optim.AdamW
+  lr: 0.0005                        # 部分解冻，适中 lr
+  optimizer_params: {}
+  ema_decay: 0
+  max_steps: 1000
+  accumulate_grad_batches: 1
+  check_val_every_n_epoch: 10
+  num_sanity_val_steps: 2
+  wandb: false
+  logger: csv
+  save_images: false
+  save_weights_only: true
+  strategy: auto
+  devices: 1
+  accelerator: gpu
+
+eval_cfg:
+  metrics: [psnr, fid, ssim]
+  save_images: false
+  max_save_images: 5
+  # FMIR scale sweep 诊断
+  fmir_scale_sweep: [1, 2, 5, 10]
+  fmir_scale_sweep_t: 0.0
+  fmir_scale_sweep_use_cond: true

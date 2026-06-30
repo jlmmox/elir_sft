@@ -1,0 +1,167 @@
+dataset_cfg:
+  train_dataset:
+    batch_size: 4
+    hq_subdir: hq
+    lq_subdir: lq
+    name: RESIDE
+    num_workers: 4
+    patch_size: 512
+    path: ~/moxt/DiffUIR/Datasets/Restoration/RESIDE/OTS_ALPHA/train
+    training: true
+    use_latent_cache: false
+  val_dataset:
+    batch_size: 1
+    hq_subdir: clear
+    lq_subdir: haze
+    name: Paired
+    num_workers: 1
+    patch_size: 512
+    path: ~/moxt/DiffUIR/Datasets/Restoration/RESIDE/SOTS/outdoor/test/val
+    training: false
+    use_latent_cache: false
+env_cfg:
+  out_dir: ./runs
+  project_name: elir
+  run_name: elir_e2e_large_dehaze
+  seed: 2025
+  task: e2e
+eval_cfg:
+  max_save_images: 4
+  metrics:
+  - psnr
+  - fid
+  - ssim
+  save_images: false
+fm_cfg:
+  alpha: 0.001
+  beta: 0.001
+  d_base_channels: 64
+  d_lr: 4.0e-05
+  d_n_layers: 3
+  detach_latent_path: false
+  dino_align: false
+  dino_perceptual: false
+  dt: 0.05
+  gan_perc_warmup_steps: 20000
+  grad_accum: 1
+  gradient_clip_val: 1.0
+  k_steps: 5
+  lambda_blur: 0
+  lambda_bridge: 0.0
+  lambda_charb: 1.0
+  lambda_color: 0.05
+  lambda_dino: 0.0
+  lambda_final_latent: 0.0
+  lambda_fm: 1.0
+  lambda_gan: 0.0
+  lambda_mmse_char: 0.1
+  lambda_perc: 0
+  lambda_pix_max: 1
+  lambda_pix_warmup_steps: 5000
+  lambda_ssim: 0.5
+  lr_min_ratio: 0.01
+  method: e2e_gan
+  prefer_lpips: true
+  sigma_min: 1.0e-05
+  sigma_s: 0.1
+  sk_fusion: false
+  t_emb_dim: 160
+  t_sampling: uniform
+  use_latent_cond: false
+log_cfg:
+  debug_cfm_details: false
+  debug_fmir_params: false
+  debug_fmir_updates: false
+  debug_validation_graph: false
+  grad_log_interval: 500
+  level: normal
+  log_memory: false
+  log_module_grad_norms: true
+  print_parameter_names: false
+  train_log_interval: 100
+model_cfg:
+  arch_cfg:
+    name: elir
+    params:
+      dec_cfg:
+        name: sft_taesd_finetuner
+        params:
+          beta_scale: 0.1
+          gamma_scale: 0.1
+          latent_channels: 16
+        path: null
+        trainable: true
+      enc_cfg:
+        name: tiny_enc
+        trainable: true
+      fm_cfg:
+        detach_latent_path: false
+        dynamic_noise: false
+        force_static_noise: false
+        k_steps: 5
+        latent_shape:
+        - 16
+        - 64
+        - 64
+        seed: 2025
+        sigma_s: 0.1
+      fmir_cfg:
+        name: lunet
+        params:
+          attn_heads: 8
+          ch_mult:
+          - 1
+          - 2
+          - 2
+          - 2
+          hid_channels: 192
+          in_channels: 16
+          n_mid_blocks: 4
+          out_channels: 16
+          overparametrization: false
+          t_emb_dim: 160
+          use_attn: true
+          use_checkpoint: true
+          use_time_dilate: false
+        trainable: true
+      mmse_cfg:
+        name: rrdbnet
+        params:
+          c_hid: 128
+          c_inout: 16
+          n_rrdb: 4
+          overparametrization: true
+        trainable: true
+      wavelet_cfg:
+        band_attn: true
+        base_channels: 16
+        enabled: true
+        fmir_use_wavelet_cond: true
+        in_channels: 3
+        trainable: true
+    path: null
+  teacher_cfg:
+    name: tiny_enc
+    params: {}
+    trainable: false
+train_cfg:
+  accelerator: gpu
+  accumulate_grad_batches: 1
+  check_val_every_n_epoch: 1
+  ckpt_path: /home/a27/moxt/elir_sftunet_ED/runs/elir_e2e_large_dehaze/epoch=0-step=3010.ckpt
+  devices: 1
+  ema_decay: 0.999
+  enc_lr_mult: 0.1
+  epochs: -1
+  logger: csv
+  lr: 0.0001
+  max_steps: 400000
+  num_sanity_val_steps: 2
+  optimizer: !!python/name:torch.optim.adamw.AdamW ''
+  optimizer_params: {}
+  precision: 32-true
+  save_images: false
+  save_weights_only: true
+  strategy: auto
+  train_mode: e2e
+  wandb: false

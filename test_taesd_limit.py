@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Optional local TAESD checkpoint path. If omitted, use the pretrained madebyollin/taesd3 weights.",
-    ):
+    )
     return parser.parse_args()
 
 

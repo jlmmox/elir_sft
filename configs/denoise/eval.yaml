@@ -1,0 +1,74 @@
+# 端到端模型评估（去噪 / Denoising）
+# 测试集: CBSD68, 噪声强度 σ=25
+# 用法：python eval.py -y configs/denoise/eval.yaml
+
+env_cfg:
+  seed: 2025
+
+dataset_cfg:
+  val_dataset:
+    name: Denoising
+    paths:
+      - ~/moxt/Datasets/Denoising/CBSD68
+    patch_size: null
+    batch_size: 1
+    num_workers: 0
+    training: false
+    sigma_choices: [25]
+
+model_cfg:
+  arch_cfg:
+    name: elir
+    params:
+      fm_cfg:
+        k_steps: 5
+        sigma_s: 0.1
+        latent_shape: [16,64,64]
+        seed: 2025
+        dynamic_noise: true
+        force_static_noise: false
+        detach_latent_path: false
+      fmir_cfg:
+        name: lunet
+        params: {ch_mult: [1,2,2,2], n_mid_blocks: 4, in_channels: 16, hid_channels: 192,
+                 out_channels: 16, t_emb_dim: 160, overparametrization: false,
+                 use_attn: true, attn_heads: 8}
+        trainable: false
+      mmse_cfg:
+        name: rrdbnet
+        params: {c_inout: 16, c_hid: 128, n_rrdb: 4, overparametrization: True}
+        trainable: false
+      enc_cfg:
+        name: taesd
+        trainable: false
+      dec_cfg:
+        name: sft_taesd_finetuner
+        path:
+        trainable: false
+        params:
+          latent_channels: 16
+          gamma_scale: 0.1
+          beta_scale: 0.1
+      wavelet_cfg:
+        enabled: true
+        in_channels: 3
+        base_channels: 16
+        use_ll: true
+        fuse_with_spatial: true
+        band_attn: true
+        fmir_use_wavelet_cond: true
+        trainable: false
+        visualize: false
+    # 替换为你的去噪 checkpoint
+    path:
+  teacher_cfg: null
+
+eval_cfg:
+  # 替换为你的去噪 checkpoint 路径
+  ckpt_path:
+  metrics: [psnr, ssim]
+  use_tta: false
+  test_y_channel: true            # 去噪通常用 Y 通道 PSNR/SSIM
+  save_images: true
+  max_save_images: 4
+  out_dir: ./runs/eval_denoise_cbsd68_s25

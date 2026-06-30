@@ -21,7 +21,7 @@ model_cfg:
     name: elir
     params:
       fm_cfg: {k_steps: 5, sigma_s: 0.1, latent_shape: [16,64,64], seed: 2025,
-               dynamic_noise: true, force_static_noise: false,
+               dynamic_noise: false, force_static_noise: false,
                detach_latent_path: false}
       fmir_cfg:
         name: lunet
@@ -54,11 +54,12 @@ model_cfg:
         trainable: false
         visualize: false
     # 替换为你的 e2e band_attn 最佳 checkpoint
-    path: /home/a27/moxt/elir_sftunet_ED/runs/elir_e2e_large_lol_timedilate/epoch=319-step=9600.ckpt
+    path:
   # 端到端评估不需要 teacher model
   teacher_cfg: null
 
 eval_cfg:
+  ckpt_path: /home/a27/moxt/elir_sftunet_ED/runs/elir_e2e_large_dehaze/epoch=1-step=6020.ckpt
   image_size: 256
   metrics: [psnr, fid, ssim]
   use_tta: true

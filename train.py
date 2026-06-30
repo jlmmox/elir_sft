@@ -16,6 +16,89 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
+def _configure_fmir_trainable_params(model, fm_cfg, log_cfg=None):
+    """配置 FMIR 可训练参数：支持 final_proj_only / head_blocks_only 诊断模式。
+
+    final_proj_only: 冻结全部 FMIR，仅解冻 final_proj 输出头。
+    head_blocks_only: 冻结大部分 FMIR，仅解冻输出侧局部 blocks
+      （latent_cond_proj + first_proj + last 2 up_blocks + 对应 sft_up
+       + final_block + final_proj）。
+    """
+    lc = log_cfg or {}
+    print_names = bool(lc.get("print_parameter_names", False))
+    final_proj_only = bool(fm_cfg.get("train_fmir_final_proj_only", False))
+    head_blocks_only = bool(fm_cfg.get("train_fmir_head_blocks_only", False))
+
+    if not (final_proj_only or head_blocks_only):
+        return
+
+    if not hasattr(model, "fmir") or model.fmir is None:
+        print("[fmir_trainable] model has no 'fmir', skipping.")
+        return
+
+    fmir = model.fmir
+    mode = "final_proj_only" if final_proj_only else "head_blocks_only"
+
+    # 1. 冻结全部参数
+    for p in fmir.parameters():
+        p.requires_grad = False
+
+    # 2. 按模式解冻
+    if final_proj_only:
+        # 仅精确匹配输出头
+        head_keywords = ["final_proj"]
+        unfrozen = []
+        for name, param in fmir.named_parameters():
+            for kw in head_keywords:
+                if kw in name:
+                    param.requires_grad = True
+                    unfrozen.append(name)
+                    break
+
+    elif head_blocks_only:
+        # 按模块结构前缀解冻 output-side 局部 blocks
+        # LUNet 结构 (ch_mult=[1,2,2,2]):
+        #   up_blocks.3 = 最靠近 final_proj 的 up block (mult=1, Identity upsample)
+        #   up_blocks.2 = 倒数第二个 up block (mult=2)
+        #   sft_up.3 / sft_up.2 = 对应层级的 TanhSFT 条件注入
+        head_prefixes = [
+            "latent_cond_proj",    # 潜在条件投影 (zero-init, 初始等价于无)
+            "first_proj",          # 输入投影
+            "up_blocks.3.",        # 最浅 up block (最靠近输出)
+            "up_blocks.2.",        # 倒数第二个 up block
+            "sft_up.3.",           # 对应浅层 TanhSFT
+            "sft_up.2.",           # 对应次浅层 TanhSFT
+            "final_block.",        # final Block2D
+            "final_proj.",         # final Conv2d 输出头
+        ]
+        unfrozen = []
+        for name, param in fmir.named_parameters():
+            for prefix in head_prefixes:
+                if name.startswith(prefix):
+                    param.requires_grad = True
+                    unfrozen.append(name)
+                    break
+
+    # 3. 统计与日志
+    all_names = [n for n, _ in fmir.named_parameters()]
+    total = len(all_names)
+    trainable = sum(1 for p in fmir.parameters() if p.requires_grad)
+
+    print(f"[{mode}] FMIR parameter summary:")
+    print(f"  total params:              {total}")
+    print(f"  trainable (after unfreeze): {trainable}")
+    if print_names:
+        print(f"  unfrozen param names:")
+        for n in unfrozen:
+            print(f"    {n}")
+
+    if trainable == 0:
+        raise RuntimeError(
+            f"{mode}=True but no params were unfrozen. "
+            "Check FMIR parameter naming versus unfreeze logic."
+        )
+
+
 def _configure_train_mode(conf):
     """Normalize module trainability based on a single train_mode switch."""
     train_cfg = conf.get("train_cfg", {})
@@ -74,8 +157,6 @@ def _configure_train_mode(conf):
     elif mode in ["e2e", "end_to_end"]:
         fmir_cfg["trainable"] = True
         mmse_cfg["trainable"] = True
-        if isinstance(enc_cfg, dict):
-            enc_cfg["trainable"] = False
         if isinstance(dec_cfg, dict):
             dec_cfg["trainable"] = True
             if dec_cfg.get("name") not in ("sft_taesd_finetuner",):
@@ -161,8 +242,18 @@ def run_train(conf):
     # If ckpt is weights-only (no optimizer state), load weights manually and avoid passing ckpt_path to trainer.
     train_cfg = conf.get("train_cfg")
     ckpt_path = train_cfg.get("ckpt_path", None)
+    load_modules = train_cfg.get("load_modules_from_ckpt", None)
+    skip_modules = train_cfg.get("skip_modules_from_ckpt", [])
     resume_ckpt = ckpt_path
-    if ckpt_path:
+
+    if ckpt_path and load_modules:
+        # ---- 选择性加载模式：只从 checkpoint 加载指定模块 ----
+        # 始终保持 fresh optimizer / fresh EMA。
+        print(f"\n[selective_load] Selective module loading enabled.")
+        model.load_selected_modules(ckpt_path, load_modules, skip_modules=skip_modules)
+        resume_ckpt = None  # fresh optimizer — never restore old state
+        print("[selective_load] resume_ckpt set to None → fresh optimizer & EMA.\n")
+    elif ckpt_path:
         try:
             ckpt = torch.load(ckpt_path, map_location="cpu")
             opt_states = ckpt.get("optimizer_states")
@@ -187,6 +278,46 @@ def run_train(conf):
     # ----------------------------
     fm_cfg = conf.get("fm_cfg",{})
     train_cfg = conf.get("train_cfg")
+
+    # FMIR 局部可训练模式：仅在非 E2E 时执行
+    train_mode = str(train_cfg.get("train_mode", "")).strip().lower()
+    if train_mode not in ("e2e", "end_to_end"):
+        _configure_fmir_trainable_params(model, fm_cfg, log_cfg=conf.get("log_cfg", {}))
+
+    # ---- E2E 训练：Encoder 必须冻结，其他模块必须可训练 ----
+    enc_trainable = sum(p.numel() for n, p in model.named_parameters()
+                        if p.requires_grad and n.startswith("enc."))
+    mmse_trainable = sum(p.numel() for n, p in model.named_parameters()
+                         if p.requires_grad and n.startswith("mmse."))
+    fmir_trainable = sum(p.numel() for n, p in model.named_parameters()
+                         if p.requires_grad and n.startswith("fmir."))
+    dec_trainable = sum(p.numel() for n, p in model.named_parameters()
+                        if p.requires_grad and n.startswith("dec."))
+    wavelet_trainable = sum(p.numel() for n, p in model.named_parameters()
+                            if p.requires_grad and n.startswith("wavelet_stem."))
+    assert enc_trainable == 0, f"Encoder has {enc_trainable} trainable params!"
+    assert mmse_trainable > 0, f"MMSE has 0 trainable params!"
+    assert fmir_trainable > 0, f"FMIR has 0 trainable params!"
+    assert dec_trainable > 0, f"Decoder has 0 trainable params!"
+    assert wavelet_trainable > 0, f"WaveletStem has 0 trainable params!"
+
+    # FMIR velocity head init check
+    if hasattr(model, 'fmir') and hasattr(model.fmir, 'final_proj'):
+        w_mean = model.fmir.final_proj.weight.detach().abs().mean().item()
+        b_mean = model.fmir.final_proj.bias.detach().abs().mean().item() if model.fmir.final_proj.bias is not None else 0.0
+        zi = getattr(model.fmir, 'zero_init_velocity_head', False)
+        print(f"[FMIR velocity head] module=final_proj, "
+              f"zero_init={zi}, "
+              f"weight_abs_mean={w_mean:.8e}, bias_abs_mean={b_mean:.8e}")
+        if zi and (w_mean > 1e-10 or b_mean > 1e-10):
+            print(f"  ⚠️  WARNING: zero_init=True but weight/bias not zero — may be overridden after init!")
+    else:
+        print(f"[FMIR velocity head] NOT FOUND — model.fmir or final_proj missing")
+
+    print(f"[trainable] enc={enc_trainable} | mmse={mmse_trainable:,} | fmir={fmir_trainable:,} | "
+          f"dec={dec_trainable:,} | wavelet={wavelet_trainable:,}")
+    print(f"[trainable] total={enc_trainable + mmse_trainable + fmir_trainable + dec_trainable + wavelet_trainable:,}")
+
     optimizer, scheduler = get_opt_sched(train_cfg, model)
     eval_cfg = conf.get("eval_cfg")
 
@@ -218,12 +349,21 @@ def run_train(conf):
                          ema_decay=train_cfg.get("ema_decay", 0.999),
                          eval_cfg=eval_cfg,
                          run_dir=run_dir,
-                         save_images=train_cfg.get("save_images", True))
+                         save_images=train_cfg.get("save_images", True),
+                         log_cfg=conf.get("log_cfg", {}))
+    _save_weights_only = train_cfg.get("save_weights_only", False)
+    if _save_weights_only:
+        print(
+            "[checkpoint] WARNING: save_weights_only=True — "
+            "last.ckpt will NOT contain optimizer/scheduler/epoch/global_step. "
+            "Resume training will use fresh optimizer and may break LR schedule. "
+            "Set save_weights_only=False for full resumability."
+        )
     checkpoint = ModelCheckpoint(run_dir,
-                                 monitor="psnr",
+                                 monitor="val_psnr",
                                  mode="max",
                                  every_n_epochs=1,
-                                 save_weights_only=train_cfg.get("save_weights_only", False),
+                                 save_weights_only=_save_weights_only,
                                  save_top_k=1,
                                  save_last=True,
                                  enable_version_counter=False,
@@ -246,6 +386,19 @@ def run_train(conf):
                         num_sanity_val_steps=train_cfg.get("num_sanity_val_steps",0),
                         check_val_every_n_epoch = train_cfg.get("check_val_every_n_epoch",1),
                         max_steps = train_cfg.get("max_steps", -1))
+
+    # ---- 打印 ModelCheckpoint 配置 ----
+    for cb in trainer.callbacks:
+        if isinstance(cb, ModelCheckpoint):
+            print(
+                "[checkpoint callback] "
+                f"monitor={cb.monitor}, "
+                f"mode={cb.mode}, "
+                f"save_top_k={cb.save_top_k}, "
+                f"best_model_score={cb.best_model_score}, "
+                f"best_model_path={cb.best_model_path}"
+            )
+
     torch.cuda.empty_cache()
     torch.set_float32_matmul_precision('high')
     set_seed(seed)
@@ -255,6 +408,7 @@ def run_train(conf):
     # Evaluation
     # ----------------------------
     results = trainer.validate(dataloaders=valloader, ckpt_path="last")
+    print(f"\n[best ckpt] {checkpoint.best_model_path}")
     metrics = eval_cfg.get("metrics")
     for metric in metrics:
         metric_value = results[0][metric]

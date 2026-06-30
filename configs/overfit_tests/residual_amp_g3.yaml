@@ -1,0 +1,172 @@
+# Residual Target Amplification Test — gamma=3.0
+# 放大 z_hq - z_mmse residual ×3，验证 FMIR 能否学到方向。
+#
+# 判断标准（1000 step）：
+#   low_t_cosine / latent_delta_cosine 从 0.05 提升到 0.15~0.2+ → residual amp 有效
+#   latent_gain_charb 明显增大 → FMIR 学到了更强的 refinement
+#   scale=1 PSNR 接近或超过 MMSE-only → 方向正确
+#   scale=2 不再立即变差 → 方向更稳定
+#
+#   cosine 仍然只有 0.05 → 不是 residual 太小，是 FMIR/LUNet 表征能力不足
+#   训练 cosine 上升但 val cosine 不升 → ODE/inference 缩放路径 mismatch
+#
+# 用法：
+#   python train.py -y configs/overfit_tests/residual_amp_g3.yaml
+
+env_cfg:
+  run_name: ovft_residual_amp_g3
+  project_name: elir
+  task: e2e
+  out_dir: ./runs
+  seed: 2025
+
+dataset_cfg:
+  train_dataset:
+    name: LOL
+    path: ~/moxt/DiffUIR/Datasets/Restoration/LOL/train
+    lq_subdir: low
+    hq_subdir: high
+    patch_size: 256
+    batch_size: 8
+    num_workers: 8
+    training: true
+    use_latent_cache: false
+  val_dataset:
+    name: LOL
+    path: ~/moxt/DiffUIR/Datasets/Restoration/LOL/test
+    lq_subdir: low
+    hq_subdir: high
+    patch_size: 256
+    batch_size: 4
+    num_workers: 4
+    training: false
+    use_latent_cache: false
+
+fm_cfg:
+  method: e2e_gan
+  k_steps: 5
+  t_emb_dim: 160
+  sigma_min: 0.00001
+
+  # ==== Residual Target Amplification ====
+  use_residual_amplification: true
+  residual_target_scale: 3.0
+  residual_infer_scale: 0.333333
+
+  # ==== 训练分布：PMRF-style low-t Flow Matching ====
+  sigma_s: 0.0
+  t_sampling: low_t
+  t_min: 0.0
+  t_max: 0.3
+
+  # ==== Flow Matching 保留 ====
+  lambda_fm: 1.0
+  lambda_mmse_char: 0.0
+  dt: 0.05
+  alpha: 0.001
+  beta: 0.0
+
+  # ==== Low-t endpoint 辅助 ====
+  lambda_low_t_endpoint: 1.0
+  low_t_endpoint_t: 0.0
+
+  # ==== PMRF MMSE fidelity guard ====
+  lambda_mmse_guard: 1.0
+
+  # ==== 潜在空间条件增强 ====
+  use_latent_cond: true
+
+  # ==== Bridge / Pixel / GAN 全部关闭 ====
+  lambda_bridge: 0.0
+  lambda_final_latent: 0.0
+  bridge_sigma_s: 0.0
+  lambda_pix_max: 0.0
+  lambda_charb: 0.0
+  lambda_ssim: 0.0
+  lambda_color: 0.0
+  lambda_blur: 0.0
+  lambda_perc: 0.0
+  lambda_gan: 0.0
+  lambda_dino: 0.0
+  dino_align: false
+  dino_perceptual: false
+  sk_fusion: false
+
+  d_lr: 0.00004
+  lr_min_ratio: 0.01
+  gan_perc_warmup_steps: 20000
+  gradient_clip_val: 1.0
+  grad_accum: 1
+
+model_cfg:
+  arch_cfg:
+    name: elir
+    params:
+      fm_cfg: {k_steps: 5, sigma_s: 0.0, latent_shape: [16,64,64], seed: 2025,
+               dynamic_noise: true, force_static_noise: false,
+               detach_latent_path: false,
+               use_latent_cond: true}
+      fmir_cfg:
+        name: lunet
+        params: {ch_mult: [1,2,2,2], n_mid_blocks: 4, in_channels: 16, hid_channels: 192,
+                 out_channels: 16, t_emb_dim: 160, overparametrization: false,
+                 use_checkpoint: true, use_attn: true, attn_heads: 8,
+                 use_time_dilate: false,
+                 use_latent_cond: true}
+        trainable: true
+      mmse_cfg:
+        name: rrdbnet
+        params: {c_inout: 16, c_hid: 128, n_rrdb: 4, overparametrization: true}
+        trainable: false
+      enc_cfg:
+        name: taesd
+        trainable: false
+      dec_cfg:
+        name: sft_taesd_finetuner
+        path:
+        trainable: false
+        params:
+          latent_channels: 16
+          gamma_scale: 0.1
+          beta_scale: 0.1
+      wavelet_cfg:
+        enabled: true
+        in_channels: 3
+        base_channels: 16
+        trainable: false
+        band_attn: true
+        fmir_use_wavelet_cond: true
+    path:                            # 填入预训练 ckpt 路径
+  teacher_cfg:
+    name: taesd
+    params: {}
+    trainable: false
+
+train_cfg:
+  train_mode: manual
+  epochs: -1
+  ckpt_path:
+  optimizer: !name:torch.optim.AdamW
+  lr: 0.0003
+  optimizer_params: {}
+  ema_decay: 0
+  max_steps: 1000
+  accumulate_grad_batches: 1
+  check_val_every_n_epoch: 10
+  num_sanity_val_steps: 2
+  wandb: false
+  logger: csv
+  save_images: false
+  save_weights_only: true
+  strategy: auto
+  devices: 1
+  accelerator: gpu
+
+eval_cfg:
+  metrics: [psnr, fid, ssim]
+  save_images: false
+  max_save_images: 5
+  # FMIR scale sweep 诊断（sweep 作用在 infer-scaled delta 上）
+  fmir_scale_sweep: [1, 2, 5, 10]
+  fmir_scale_sweep_t: 0.0
+  fmir_scale_sweep_use_cond: true
